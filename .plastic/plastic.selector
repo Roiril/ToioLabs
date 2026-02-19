@@ -1,0 +1,4 @@
+repository "ToioCharacterSync_URP/ToioCharacterSync_URP@15668557731380@cloud"
+  path "/"
+    br "/main"
+    co "/main"
