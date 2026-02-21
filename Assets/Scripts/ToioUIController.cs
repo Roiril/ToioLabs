@@ -3,256 +3,391 @@ using UnityEngine.UI;
 using UnityEngine.EventSystems;
 using toio;
 using Cysharp.Threading.Tasks;
+using TMPro;
 
-public class ToioUIController : MonoBehaviour, IDragHandler, IPointerDownHandler
+namespace ToioLabs.UI
 {
-    [Header("UI References")]
-    public RectTransform touchPanelRect;
-
-    [Header("Mat Coordinate Settings")]
-    public float panelWidth = 400f;
-    public float panelHeight = 400f;
-    public int matMinX = 45;
-    public int matMaxX = 455;
-    public int matMinY = 45;
-    public int matMaxY = 455;
-
-    [Header("Control Settings")]
-    public float sendInterval = 0.1f; // 0.1秒
-    public float minDistance = 20f;   // 20dot
-
-    [Header("Debug")]
-    public bool showDebugLogs = true; // デバッグログ表示切り替え
-
-    private CubeManager cubeManager;
-    private Cube connectedCube;
-    private float lastSendTime;
-    private Vector2 lastSentMatPos;
-
-    async void Start()
+    [RequireComponent(typeof(RectTransform))]
+    public class ToioUIController : MonoBehaviour, IDragHandler, IPointerDownHandler
     {
-        // 自動的に参照を取得（アタッチ漏れ防止）
-        if (touchPanelRect == null)
+        public enum CalibrationState
         {
-            touchPanelRect = GetComponent<RectTransform>();
+            None,
+            WaitingFL, // Front-Left
+            WaitingFR, // Front-Right
+            WaitingBR, // Back-Right
+            WaitingBL, // Back-Left
+            Done
         }
 
-        // Cube接続処理
-        cubeManager = new CubeManager(ConnectType.Real);
-        var cubes = await cubeManager.MultiConnect(1);
-        
-        if (cubes != null && cubes.Length > 0)
+        [Header("UI References (Assign in Inspector)")]
+        [SerializeField, Tooltip("Main panel for touch input. Use this for coordinate mapping.")]
+        private RectTransform _touchPanelRect;
+
+        [SerializeField, Tooltip("Indicator that shows the cube's real-time position on the panel.")]
+        private RectTransform _toioIndicator;
+
+        [SerializeField, Tooltip("Image component of the touch panel for visibility control.")]
+        private Image _touchPanelImage;
+
+        [Header("Status Fields")]
+        [SerializeField] private TextMeshProUGUI _connectionStatusText;
+        [SerializeField] private TextMeshProUGUI _batteryStatusText;
+        [SerializeField] private TextMeshProUGUI _matPosStatusText;
+        [SerializeField] private TextMeshProUGUI _instructionText;
+        [SerializeField] private TextMeshProUGUI _calibrationStatusText;
+
+        [Header("Mat Coordinate Settings (Standard Toio Mat)")]
+        [SerializeField] private float _panelWidth = 400f;
+        [SerializeField] private float _panelHeight = 400f;
+        [SerializeField] private int _matMinX = 45;
+        [SerializeField] private int _matMaxX = 455;
+        [SerializeField] private int _matMinY = 45;
+        [SerializeField] private int _matMaxY = 455;
+
+        [Header("Telemetry Settings")]
+        [SerializeField] private float _sendInterval = 0.1f;
+        [SerializeField] private float _minDistance = 20f;
+        [SerializeField] private float _batteryUpdateInterval = 10f;
+        [SerializeField] private float _posUpdateInterval = 0.1f;
+
+        private CubeManager _cubeManager;
+        private Cube _connectedCube;
+        private float _lastSendTime;
+        private Vector2 _lastSentMatPos;
+        private float _nextBatteryUpdateTime;
+        private float _nextPosUpdateTime;
+
+        private CalibrationState _currentState = CalibrationState.None;
+        private System.Collections.Generic.List<Vector2Int> _calibrationPoints = new System.Collections.Generic.List<Vector2Int>();
+        private Vector2 _initialPanelSize;
+
+        [Header("Calibration Visual Feedback")]
+        [SerializeField, Tooltip("Visual feedback controller for calibration points.")]
+        private CalibrationVisualizer _calibVisualizer;
+
+        // Static strings to avoid GC allocation
+        private const string INSTR_GUIDE = "Guide:\n[Click] Move Toio\n[Space] Calibrate\n[P] Patrol";
+        private const string INSTR_WAIT_FL = "Calibration:\nMove to Front-Left and press Space";
+        private const string INSTR_WAIT_FR = "Calibration:\nMove to Front-Right and press Space";
+        private const string INSTR_WAIT_BR = "Calibration:\nMove to Back-Right and press Space";
+        private const string INSTR_WAIT_BL = "Calibration:\nMove to Back-Left and press Space";
+        private const string INSTR_CALIB_DONE = "Calibration: Done!\nAspect ratio adjusted.";
+
+        private void Awake()
         {
-            connectedCube = cubes[0];
-            connectedCube.TurnLedOn(0, 0, 255, 500); // 接続成功時に青点灯
-            Debug.Log($"[ToioUI] Connected: {connectedCube.id}");
+            if (_touchPanelRect == null) _touchPanelRect = GetComponent<RectTransform>();
+            if (_touchPanelImage == null) _touchPanelImage = _touchPanelRect.GetComponent<Image>();
+            if (_toioIndicator == null) _toioIndicator = transform.Find("ToioIndicator")?.GetComponent<RectTransform>();
 
-            // センサー有効化（座標取得のため）
-            await connectedCube.ConfigIDNotification(500, Cube.IDNotificationType.OnChanged);
-            await connectedCube.ConfigIDMissedNotification(500);
-        }
-        else
-        {
-            Debug.LogWarning("[ToioUI] Connection Failed: No cubes found.");
-        }
-    }
-
-    public void OnPointerDown(PointerEventData eventData)
-    {
-        ProcessInput(eventData.position, "PointerDown");
-    }
-
-    public void OnDrag(PointerEventData eventData)
-    {
-        ProcessInput(eventData.position, "Drag");
-    }
-
-    private void ProcessInput(Vector2 screenPos, string inputType)
-    {
-        if (connectedCube == null || touchPanelRect == null) return;
-
-        Vector2 localPoint;
-        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(touchPanelRect, screenPos, null, out localPoint))
-        {
-            // パネル座標系: 中心が(0,0)の場合と、Pivotによる違いを吸収するため正規化
-            // 想定: Anchor/Pivotが中心(0.5, 0.5)でサイズ400x400の場合、localPointは -200~200
-            
-            // localPointを 0~1 の正規化座標に変換 (Pivot 0.5, 0.5 前提)
-            float normalizedX = Mathf.InverseLerp(-panelWidth / 2, panelWidth / 2, localPoint.x);
-            float normalizedY = Mathf.InverseLerp(-panelHeight / 2, panelHeight / 2, localPoint.y);
-
-            // 0~1 を Mat座標に変換
-            int targetX = (int)Mathf.Lerp(matMinX, matMaxX, normalizedX);
-            int targetY = (int)Mathf.Lerp(matMinY, matMaxY, normalizedY);
-            
-            // Clamp to mat bounds (Correctly handle min > max cases for inverted axes)
-            int clampMinX = Mathf.Min(matMinX, matMaxX);
-            int clampMaxX = Mathf.Max(matMinX, matMaxX);
-            int clampMinY = Mathf.Min(matMinY, matMaxY);
-            int clampMaxY = Mathf.Max(matMinY, matMaxY);
-
-            targetX = Mathf.Clamp(targetX, clampMinX, clampMaxX);
-            targetY = Mathf.Clamp(targetY, clampMinY, clampMaxY);
-
-            if (showDebugLogs)
+            var dashboard = transform.parent;
+            if (dashboard != null)
             {
-                Debug.Log($"[ToioUI] Input({inputType}) Screen:{screenPos} -> Local:{localPoint} -> Norm:({normalizedX:F2}, {normalizedY:F2}) -> Mat:({targetX}, {targetY})");
+                var statusFrame = dashboard.Find("StatusFrame");
+                if (statusFrame != null)
+                {
+                    if (_connectionStatusText == null) _connectionStatusText = statusFrame.Find("ConnectionStatus")?.GetComponent<TextMeshProUGUI>();
+                    if (_batteryStatusText == null) _batteryStatusText = statusFrame.Find("BatteryStatus")?.GetComponent<TextMeshProUGUI>();
+                    if (_matPosStatusText == null) _matPosStatusText = statusFrame.Find("MatPosStatus")?.GetComponent<TextMeshProUGUI>();
+                }
+                if (_instructionText == null) _instructionText = dashboard.Find("InstructionFrame")?.GetComponent<TextMeshProUGUI>();
+                if (_calibrationStatusText == null) _calibrationStatusText = dashboard.Find("StatusFrame")?.Find("CalibrationStatus")?.GetComponent<TextMeshProUGUI>();
             }
 
-            // 送信判定 (Throttling)
-            if (ShouldSendCommand(new Vector2(targetX, targetY)))
+            // Panel is hidden until calibration is done
+            if (_touchPanelImage != null) _touchPanelImage.enabled = false;
+        }
+
+        private void Start()
+        {
+            // Capture initial panel size after layout pass
+            _initialPanelSize = _touchPanelRect.rect.size;
+            if (_initialPanelSize == Vector2.zero)
+                _initialPanelSize = _touchPanelRect.sizeDelta;
+
+            ConnectAndCalibrate().Forget();
+        }
+
+        private async UniTaskVoid ConnectAndCalibrate()
+        {
+            UpdateConnectionStatus("Scanning...", Color.yellow);
+            UpdateInstructions();
+
+            _cubeManager = new CubeManager(ConnectType.Real);
+            var cubes = await _cubeManager.MultiConnect(1);
+
+            if (cubes != null && cubes.Length > 0)
             {
-                MoveCube(targetX, targetY);
+                _connectedCube = cubes[0];
+                _connectedCube.TurnLedOn(0, 0, 255, 500);
+                UpdateConnectionStatus("Connected", Color.green);
+
+#if UNITY_EDITOR
+                Debug.Log($"[ToioUI] Connected: {_connectedCube.id}");
+#endif
+
+                await _connectedCube.ConfigIDNotification(500, Cube.IDNotificationType.OnChanged);
+                await _connectedCube.ConfigIDMissedNotification(500);
+
+                // Re-capture size after all awaits (layout guaranteed)
+                _initialPanelSize = _touchPanelRect.rect.size;
+                if (_initialPanelSize == Vector2.zero)
+                    _initialPanelSize = _touchPanelRect.sizeDelta;
+
+                EnterCalibration();
+            }
+            else
+            {
+                UpdateConnectionStatus("Disconnected", Color.red);
+#if UNITY_EDITOR
+                Debug.LogWarning("[ToioUI] Connection Failed: No cubes found.");
+#endif
             }
         }
-    }
 
-    private bool ShouldSendCommand(Vector2 targetPos)
-    {
-        float timeSinceLast = Time.time - lastSendTime;
-        float distance = Vector2.Distance(targetPos, lastSentMatPos);
-
-        bool shouldSend = (timeSinceLast >= sendInterval && distance >= minDistance);
-
-        if (!shouldSend && showDebugLogs)
+        void Update()
         {
-            // Debug.Log($"[ToioUI] Skipped: Time={timeSinceLast:F2}/{sendInterval}, Dist={distance:F1}/{minDistance}");
+            if (_connectedCube == null) return;
+
+            UpdateTelemetry();
+
+            if (Input.GetKeyDown(KeyCode.Space))
+            {
+                RecordCalibrationPoint();
+            }
         }
 
-        return shouldSend;
-    }
-
-    // Calibration
-    private System.Collections.Generic.List<Vector2Int> calibrationPoints = new System.Collections.Generic.List<Vector2Int>();
-    private System.Collections.Generic.List<GameObject> markers = new System.Collections.Generic.List<GameObject>();
-
-    void Update()
-    {
-        if (connectedCube == null) return;
-
-        // Calibration Input
-        if (Input.GetKeyDown(KeyCode.Space))
+        private void UpdateTelemetry()
         {
-            RecordCalibrationPoint();
-        }
-    }
+            if (_toioIndicator != null)
+            {
+                _toioIndicator.anchoredPosition = MapMatToLocal(_connectedCube.x, _connectedCube.y);
+            }
 
-    private void RecordCalibrationPoint()
-    {
-        if (connectedCube == null) return;
+            if (Time.time >= _nextPosUpdateTime)
+            {
+                if (_matPosStatusText != null)
+                {
+                    _matPosStatusText.text = $"Pos: ({_connectedCube.x}, {_connectedCube.y})";
+                }
+                _nextPosUpdateTime = Time.time + _posUpdateInterval;
+            }
 
-        int x = connectedCube.x;
-        int y = connectedCube.y;
+            if (Time.time >= _nextBatteryUpdateTime)
+            {
+                if (_batteryStatusText != null)
+                {
+                    _batteryStatusText.text = $"Battery: {_connectedCube.battery}%";
+                }
+                _nextBatteryUpdateTime = Time.time + _batteryUpdateInterval;
+            }
 
-        Debug.Log($"[ToioUI] Calibration Attempt: Raw Coords ({x}, {y})");
-
-        // Mat coordinate validity check
-        if (x == 0 && y == 0)
-        {
-            Debug.LogWarning("[ToioUI] Cannot calibrate: Cube not on mat (0,0). Check connection or sensor.");
-            return;
+            if (!_connectedCube.isConnected)
+            {
+                UpdateConnectionStatus("Disconnected", Color.red);
+            }
         }
 
-        calibrationPoints.Add(new Vector2Int(x, y));
-        Debug.Log($"[ToioUI] Calibration Point {calibrationPoints.Count} Recorded: ({x}, {y})");
-
-        // Visual Feedback: Show Marker
-        ShowMarker(x, y);
-
-        connectedCube.TurnLedOn(255, 255, 0, 500); // Flash Yellow
-
-        if (calibrationPoints.Count >= 4)
+        private Vector2 MapMatToLocal(int matX, int matY)
         {
-            ApplyCalibration();
-            calibrationPoints.Clear();
-        }
-    }
+            float normX = Mathf.InverseLerp(_matMinX, _matMaxX, matX);
+            float normY = Mathf.InverseLerp(_matMinY, _matMaxY, matY);
 
-    private void ShowMarker(int matX, int matY)
-    {
-        // Create a new UI Object for the marker
-        GameObject markerObj = new GameObject("Marker");
-        markerObj.transform.SetParent(this.transform); // Child of TouchPanel
-        
-        // Add Image
-        Image img = markerObj.AddComponent<Image>();
-        img.color = Color.black; 
-        
-        // Use a small size
-        RectTransform rt = markerObj.GetComponent<RectTransform>();
-        rt.sizeDelta = new Vector2(10, 10); // 10x10 dot
-        rt.anchorMin = new Vector2(0.5f, 0.5f);
-        rt.anchorMax = new Vector2(0.5f, 0.5f);
-        
-        // Convert Mat(x,y) -> UI Local Position
-        // We use the CURRENT settings to approximate visual location.
-        float normalizedX = Mathf.InverseLerp(matMinX, matMaxX, matX);
-        float normalizedY = Mathf.InverseLerp(matMinY, matMaxY, matY); 
-        
-        // Normalize to UI size (-W/2 to W/2)
-        float uiX = Mathf.Lerp(-panelWidth / 2, panelWidth / 2, normalizedX);
-        float uiY = Mathf.Lerp(-panelHeight / 2, panelHeight / 2, normalizedY);
-        
-        rt.anchoredPosition = new Vector2(uiX, uiY);
-        
-        markers.Add(markerObj);
-    }
+            float w = _touchPanelRect.rect.width;
+            float h = _touchPanelRect.rect.height;
 
-    private void ApplyCalibration()
-    {
-        int minX = int.MaxValue;
-        int maxX = int.MinValue;
-        int minY = int.MaxValue;
-        int maxY = int.MinValue;
+            float uiX = Mathf.Lerp(-w / 2f, w / 2f, normX);
+            float uiY = Mathf.Lerp(-h / 2f, h / 2f, normY);
 
-        foreach (var p in calibrationPoints)
-        {
-            if (p.x < minX) minX = p.x;
-            if (p.x > maxX) maxX = p.x;
-            if (p.y < minY) minY = p.y;
-            if (p.y > maxY) maxY = p.y;
+            return new Vector2(uiX, uiY);
         }
 
-        Debug.Log($"[ToioUI] Bounds Detected: X[{minX}~{maxX}], Y[{minY}~{maxY}]");
-
-        // Apply new bounds
-        // Panel Left -> Min X
-        // Panel Right -> Max X
-        // Panel Bottom -> Max Y (Larger value)
-        // Panel Top -> Min Y (Smaller value)
-        
-        matMinX = minX;
-        matMaxX = maxX;
-        matMinY = maxY; // Bottom of Screen
-        matMaxY = minY; // Top of Screen
-
-        Debug.Log($"[ToioUI] Calibration Complete! New Mapping: X[{matMinX}-{matMaxX}], Y[{matMinY}(Bottom)-{matMaxY}(Top)]");
-        connectedCube.TurnLedOn(0, 255, 0, 1000); // Green Flash
-        
-        // Cleanup old markers
-        foreach(var m in markers) Destroy(m, 2.0f); 
-        markers.Clear();
-    }
-
-    private void MoveCube(int x, int y)
-    {
-        if (connectedCube == null) return;
-
-        // 目標地点へ移動 (回転しながら移動)
-        connectedCube.TargetMove(
-             targetX: x, 
-             targetY: y, 
-             targetAngle: 0, 
-             maxSpd: 80, 
-             targetMoveType: Cube.TargetMoveType.RotatingMove
-             );
-        
-        lastSendTime = Time.time;
-        lastSentMatPos = new Vector2(x, y);
-        
-        if (showDebugLogs)
+        public void OnPointerDown(PointerEventData eventData)
         {
-            Debug.Log($"[ToioUI] Command Sent: MoveTo({x}, {y})");
+            ProcessInput(eventData.position, "PointerDown");
+        }
+
+        public void OnDrag(PointerEventData eventData)
+        {
+            ProcessInput(eventData.position, "Drag");
+        }
+
+        private void ProcessInput(Vector2 screenPos, string inputType)
+        {
+            if (_connectedCube == null || _touchPanelRect == null || _currentState != CalibrationState.Done) return;
+
+            Vector2 localPoint;
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(_touchPanelRect, screenPos, null, out localPoint))
+            {
+                float w = _touchPanelRect.rect.width;
+                float h = _touchPanelRect.rect.height;
+
+                float normX = Mathf.InverseLerp(-w / 2f, w / 2f, localPoint.x);
+                float normY = Mathf.InverseLerp(-h / 2f, h / 2f, localPoint.y);
+
+                int targetX = (int)Mathf.Lerp(_matMinX, _matMaxX, normX);
+                int targetY = (int)Mathf.Lerp(_matMinY, _matMaxY, normY);
+
+                targetX = Mathf.Clamp(targetX, Mathf.Min(_matMinX, _matMaxX), Mathf.Max(_matMinX, _matMaxX));
+                targetY = Mathf.Clamp(targetY, Mathf.Min(_matMinY, _matMaxY), Mathf.Max(_matMinY, _matMaxY));
+
+                if (Time.time - _lastSendTime >= _sendInterval && Vector2.Distance(new Vector2(targetX, targetY), _lastSentMatPos) >= _minDistance)
+                {
+                    MoveCube(targetX, targetY);
+                }
+            }
+        }
+
+        private void MoveCube(int x, int y)
+        {
+            _connectedCube.TargetMove(targetX: x, targetY: y, targetAngle: 0, maxSpd: 80, targetMoveType: Cube.TargetMoveType.RotatingMove);
+            _lastSendTime = Time.time;
+            _lastSentMatPos = new Vector2(x, y);
+        }
+
+        private void UpdateConnectionStatus(string status, Color color)
+        {
+            if (_connectionStatusText != null)
+            {
+                _connectionStatusText.text = $"Status: {status}";
+                _connectionStatusText.color = color;
+            }
+        }
+
+        private void UpdateInstructions()
+        {
+            if (_instructionText == null) return;
+            switch (_currentState)
+            {
+                case CalibrationState.None:      _instructionText.text = INSTR_GUIDE;     break;
+                case CalibrationState.WaitingFL: _instructionText.text = INSTR_WAIT_FL;  break;
+                case CalibrationState.WaitingFR: _instructionText.text = INSTR_WAIT_FR;  break;
+                case CalibrationState.WaitingBR: _instructionText.text = INSTR_WAIT_BR;  break;
+                case CalibrationState.WaitingBL: _instructionText.text = INSTR_WAIT_BL;  break;
+                case CalibrationState.Done:      _instructionText.text = INSTR_CALIB_DONE; break;
+            }
+        }
+
+        // ─────── Calibration ───────
+
+        private void EnterCalibration()
+        {
+            _calibrationPoints.Clear();
+            _currentState = CalibrationState.WaitingFL;
+            if (_calibVisualizer != null) _calibVisualizer.Reset();
+            UpdateInstructions();
+        }
+
+        private void RecordCalibrationPoint()
+        {
+            if (_connectedCube == null || (_connectedCube.x == 0 && _connectedCube.y == 0)) return;
+            if (_currentState == CalibrationState.Done || _currentState == CalibrationState.None) return;
+
+            int idx = _calibrationPoints.Count;
+            _calibrationPoints.Add(new Vector2Int(_connectedCube.x, _connectedCube.y));
+            _connectedCube.TurnLedOn(255, 255, 0, 500);
+
+            // Visual feedback via CalibrationVisualizer
+            if (_calibVisualizer != null)
+            {
+                Vector2 panelPos = MapMatToLocal(_connectedCube.x, _connectedCube.y);
+                _calibVisualizer.ShowDot(idx, panelPos);
+
+                // Draw edges as points accumulate
+                // Edge index mapping: 0=FL-FR, 1=FR-BR, 2=BR-BL, 3=BL-FL
+                if (idx == 1) _calibVisualizer.ShowEdge(0, 0, 1);       // FL → FR
+                else if (idx == 2) _calibVisualizer.ShowEdge(1, 1, 2);  // FR → BR
+                else if (idx == 3)
+                {
+                    _calibVisualizer.ShowEdge(2, 2, 3); // BR → BL
+                    _calibVisualizer.ShowEdge(3, 3, 0); // BL → FL (close the loop)
+                }
+            }
+
+            // Advance state
+            switch (_currentState)
+            {
+                case CalibrationState.WaitingFL: _currentState = CalibrationState.WaitingFR; break;
+                case CalibrationState.WaitingFR: _currentState = CalibrationState.WaitingBR; break;
+                case CalibrationState.WaitingBR: _currentState = CalibrationState.WaitingBL; break;
+                case CalibrationState.WaitingBL: _currentState = CalibrationState.Done;      break;
+            }
+
+            if (_currentState == CalibrationState.Done)
+            {
+                ApplyCalibration();
+            }
+
+            UpdateInstructions();
+            UpdateCalibrationStatus();
+        }
+
+
+
+        private void UpdateCalibrationStatus()
+        {
+            if (_calibrationStatusText == null) return;
+            if (_currentState == CalibrationState.Done)
+            {
+                _calibrationStatusText.text = "Calibration: Done";
+                _calibrationStatusText.color = Color.green;
+            }
+            else
+            {
+                _calibrationStatusText.text = $"Calibration: [{_calibrationPoints.Count}/4]";
+                _calibrationStatusText.color = Color.yellow;
+            }
+        }
+
+        private void ApplyCalibration()
+        {
+            if (_calibrationPoints.Count < 4) return;
+
+            // FL:0, FR:1, BR:2, BL:3
+            int minX = Mathf.Min(_calibrationPoints[0].x, _calibrationPoints[3].x);
+            int maxX = Mathf.Max(_calibrationPoints[1].x, _calibrationPoints[2].x);
+            int minY = Mathf.Min(_calibrationPoints[0].y, _calibrationPoints[1].y);
+            int maxY = Mathf.Max(_calibrationPoints[2].y, _calibrationPoints[3].y);
+
+            _matMinX = minX; _matMaxX = maxX; _matMinY = minY; _matMaxY = maxY;
+
+            // Resize panel to match physical aspect ratio, constrained by initial UI bounds
+            float physWidth  = maxX - minX;
+            float physHeight = maxY - minY;
+            if (physHeight > 0 && _initialPanelSize.y > 0)
+            {
+                float targetAR  = physWidth / physHeight;
+                float initialAR = _initialPanelSize.x / _initialPanelSize.y;
+
+                Vector2 newSize;
+                if (targetAR > initialAR)
+                    newSize = new Vector2(_initialPanelSize.x, _initialPanelSize.x / targetAR);
+                else
+                    newSize = new Vector2(_initialPanelSize.y * targetAR, _initialPanelSize.y);
+
+                // Apply without changing localScale
+                _touchPanelRect.sizeDelta = newSize;
+            }
+
+            _connectedCube.TurnLedOn(0, 255, 0, 1000);
+
+            // Show filled rect, then transition to the touch panel
+            if (_calibVisualizer != null)
+            {
+                _calibVisualizer.ShowFilledRect();
+                _calibVisualizer.TransitionOut(() =>
+                {
+                    if (_touchPanelImage != null) _touchPanelImage.enabled = true;
+                });
+            }
+            else
+            {
+                if (_touchPanelImage != null) _touchPanelImage.enabled = true;
+            }
+
+#if UNITY_EDITOR
+            Debug.Log($"[ToioUI] Calibration done. Mat: X[{_matMinX},{_matMaxX}] Y[{_matMinY},{_matMaxY}]. Panel: {_touchPanelRect.sizeDelta}");
+#endif
         }
     }
 }
