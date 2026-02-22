@@ -372,23 +372,8 @@ namespace ToioLabs.UI
 
             _matMinX = minX; _matMaxX = maxX; _matMinY = minY; _matMaxY = maxY;
 
-            // Resize panel to match physical aspect ratio, constrained by initial UI bounds
-            float physWidth  = maxX - minX;
-            float physHeight = maxY - minY;
-            if (physHeight > 0 && _initialPanelSize.y > 0)
-            {
-                float targetAR  = physWidth / physHeight;
-                float initialAR = _initialPanelSize.x / _initialPanelSize.y;
-
-                Vector2 newSize;
-                if (targetAR > initialAR)
-                    newSize = new Vector2(_initialPanelSize.x, _initialPanelSize.x / targetAR);
-                else
-                    newSize = new Vector2(_initialPanelSize.y * targetAR, _initialPanelSize.y);
-
-                // Apply without changing localScale
-                _touchPanelRect.sizeDelta = newSize;
-            }
+            // Note: panel is no longer pre-resized here.
+            // The CalibFilledRect (created in ShowFilledRect) defines the live panel shape.
 
             _connectedCube.TurnLedOn(0, 255, 0, 1000);
 

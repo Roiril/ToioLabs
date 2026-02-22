@@ -429,6 +429,12 @@ namespace ToioLabs.UI
                     DestroyChild(ref _edges[i]);
                     _edgeImages[i] = null;
                 }
+                // Allow raycasts on FilledRect (CanvasGroup.interactable=false blocked them)
+                if (_overlayGroup != null)
+                {
+                    _overlayGroup.interactable = true;
+                    _overlayGroup.blocksRaycasts = true;
+                }
                 _onPanelReady?.Invoke(_filledRect);
                 _onPanelReady = null;
             }
