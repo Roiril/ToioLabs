@@ -7,8 +7,8 @@ namespace ToioLabs.UI
 {
     /// <summary>
     /// "Connect the Dots" calibration visual feedback.
-    /// Displays dots at recorded calibration points with pulse animations,
-    /// draws edges between them, and fades in a filled rectangle on completion.
+    /// After completion, dots and edges fade out while the filled rectangle
+    /// remains as the new touch input area (handed off via MakePanelLive).
     /// </summary>
     public class CalibrationVisualizer : MonoBehaviour
     {
@@ -70,11 +70,15 @@ namespace ToioLabs.UI
         private bool _animatingRectFade;
         private float _rectFadeStartTime;
 
-        private bool _animatingTransitionOut;
-        private float _transitionOutStartTime;
+        private bool _animatingFadeDecorations;
+        private float _fadeDecorationsStartTime;
+        private float _fadeDecorationsDuration = 0.4f;
 
-        // Callback after transition completes
-        private System.Action _onTransitionComplete;
+        // Callback after MakePanelLive completes — passes FilledRect RT
+        private System.Action<RectTransform> _onPanelReady;
+
+        /// <summary>The RectTransform of the filled calibration rect (valid after ShowFilledRect).</summary>
+        public RectTransform FilledRect => _filledRect;
 
         private void Awake()
         {
@@ -95,7 +99,7 @@ namespace ToioLabs.UI
             if (_animatingPulse) UpdatePulseAnimation();
             if (_animatingEdge) UpdateEdgeAnimation();
             if (_animatingRectFade) UpdateRectFadeAnimation();
-            if (_animatingTransitionOut) UpdateTransitionOutAnimation();
+            if (_animatingFadeDecorations) UpdateFadeDecorationsAnimation();
         }
 
         // ─────── Public API ───────
@@ -179,13 +183,23 @@ namespace ToioLabs.UI
         }
 
         /// <summary>
-        /// Fade out all calibration visuals. Calls onComplete when done.
+        /// Fades out dots and edges, keeps the filled rect visible.
+        /// Calls onReady(filledRectRT) when the fade is done.
         /// </summary>
-        public void TransitionOut(System.Action onComplete)
+        public void MakePanelLive(System.Action<RectTransform> onReady)
         {
-            _onTransitionComplete = onComplete;
-            _animatingTransitionOut = true;
-            _transitionOutStartTime = Time.time;
+            if (_filledRect == null)
+            {
+                onReady?.Invoke(null);
+                return;
+            }
+            // Ensure the rect is fully visible
+            if (_filledRectImage != null)
+                _filledRectImage.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0.18f);
+
+            _onPanelReady = onReady;
+            _animatingFadeDecorations = true;
+            _fadeDecorationsStartTime = Time.time;
         }
 
         /// <summary>
@@ -196,7 +210,7 @@ namespace ToioLabs.UI
             _animatingPulse = false;
             _animatingEdge = false;
             _animatingRectFade = false;
-            _animatingTransitionOut = false;
+            _animatingFadeDecorations = false;
             _dotCount = 0;
 
             for (int i = 0; i < 4; i++)
@@ -385,21 +399,38 @@ namespace ToioLabs.UI
             }
         }
 
-        private void UpdateTransitionOutAnimation()
+        private void UpdateFadeDecorationsAnimation()
         {
-            float elapsed = Time.time - _transitionOutStartTime;
-            float t = Mathf.Clamp01(elapsed / _transitionOutDuration);
+            float elapsed = Time.time - _fadeDecorationsStartTime;
+            float t = Mathf.Clamp01(elapsed / _fadeDecorationsDuration);
+            float alpha = Mathf.Lerp(1f, 0f, t);
 
-            // Ease in
-            float eased = t * t;
-            _overlayGroup.alpha = Mathf.Lerp(1f, 0f, eased);
+            // Fade dots and edges only
+            for (int i = 0; i < 4; i++)
+            {
+                if (_dotGroups[i] != null) _dotGroups[i].alpha = alpha;
+                if (_edgeImages[i] != null)
+                {
+                    Color c = _edgeImages[i].color;
+                    _edgeImages[i].color = new Color(c.r, c.g, c.b, alpha * 0.6f);
+                }
+            }
 
             if (t >= 1f)
             {
-                _animatingTransitionOut = false;
-                _onTransitionComplete?.Invoke();
-                _onTransitionComplete = null;
-                Reset();
+                _animatingFadeDecorations = false;
+                // Destroy dots and edges, keep filled rect
+                for (int i = 0; i < 4; i++)
+                {
+                    DestroyChild(ref _dots[i]);
+                    _dotGroups[i] = null;
+                    DestroyChild(ref _pulseRings[i]);
+                    _pulseGroups[i] = null;
+                    DestroyChild(ref _edges[i]);
+                    _edgeImages[i] = null;
+                }
+                _onPanelReady?.Invoke(_filledRect);
+                _onPanelReady = null;
             }
         }
 

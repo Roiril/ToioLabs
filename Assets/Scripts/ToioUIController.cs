@@ -51,6 +51,14 @@ namespace ToioLabs.UI
         [SerializeField] private float _batteryUpdateInterval = 10f;
         [SerializeField] private float _posUpdateInterval = 0.1f;
 
+        [Header("Panel Scale")]
+        [SerializeField, Tooltip("Mouse-wheel scale sensitivity.")]
+        private float _scrollSensitivity = 0.1f;
+        [SerializeField, Tooltip("Minimum scale for the live touch panel.")]
+        private float _panelScaleMin = 0.3f;
+        [SerializeField, Tooltip("Maximum scale for the live touch panel.")]
+        private float _panelScaleMax = 3.0f;
+
         private CubeManager _cubeManager;
         private Cube _connectedCube;
         private float _lastSendTime;
@@ -61,6 +69,7 @@ namespace ToioLabs.UI
         private CalibrationState _currentState = CalibrationState.None;
         private System.Collections.Generic.List<Vector2Int> _calibrationPoints = new System.Collections.Generic.List<Vector2Int>();
         private Vector2 _initialPanelSize;
+        private bool _panelLive;  // true after MakePanelLive completes
 
         [Header("Calibration Visual Feedback")]
         [SerializeField, Tooltip("Visual feedback controller for calibration points.")]
@@ -154,6 +163,18 @@ namespace ToioLabs.UI
             if (Input.GetKeyDown(KeyCode.Space))
             {
                 RecordCalibrationPoint();
+            }
+
+            // Mouse-wheel scale for the live touch panel
+            if (_panelLive && _touchPanelRect != null)
+            {
+                float scroll = Input.mouseScrollDelta.y;
+                if (scroll != 0f)
+                {
+                    Vector3 s = _touchPanelRect.localScale;
+                    float newScale = Mathf.Clamp(s.x + scroll * _scrollSensitivity, _panelScaleMin, _panelScaleMax);
+                    _touchPanelRect.localScale = new Vector3(newScale, newScale, 1f);
+                }
             }
         }
 
@@ -371,13 +392,19 @@ namespace ToioLabs.UI
 
             _connectedCube.TurnLedOn(0, 255, 0, 1000);
 
-            // Show filled rect, then transition to the touch panel
+            // Fade out dots/edges, keep filled rect — swap _touchPanelRect to it
             if (_calibVisualizer != null)
             {
                 _calibVisualizer.ShowFilledRect();
-                _calibVisualizer.TransitionOut(() =>
+                _calibVisualizer.MakePanelLive(liveRect =>
                 {
-                    if (_touchPanelImage != null) _touchPanelImage.enabled = true;
+                    if (liveRect != null)
+                    {
+                        _touchPanelRect = liveRect;
+                        var img = liveRect.GetComponent<Image>();
+                        if (img != null) img.raycastTarget = true;
+                    }
+                    _panelLive = true;
                 });
             }
             else
