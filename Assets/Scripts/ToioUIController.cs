@@ -8,7 +8,7 @@ using TMPro;
 namespace ToioLabs.UI
 {
     [RequireComponent(typeof(RectTransform))]
-    public class ToioUIController : MonoBehaviour, IDragHandler, IPointerDownHandler
+    public class ToioUIController : MonoBehaviour
     {
         public enum CalibrationState
         {
@@ -21,13 +21,13 @@ namespace ToioLabs.UI
         }
 
         [Header("UI References (Assign in Inspector)")]
-        [SerializeField, Tooltip("Main panel for touch input. Use this for coordinate mapping.")]
+        [SerializeField, Tooltip("Main panel RectTransform (original reference, used as fallback).")]
         private RectTransform _touchPanelRect;
 
-        [SerializeField, Tooltip("Indicator that shows the cube's real-time position on the panel.")]
+        [SerializeField, Tooltip("Indicator that shows the cube's real-time position.")]
         private RectTransform _toioIndicator;
 
-        [SerializeField, Tooltip("Image component of the touch panel for visibility control.")]
+        [SerializeField, Tooltip("Image component of the touch panel (disabled during calibration).")]
         private Image _touchPanelImage;
 
         [Header("Status Fields")]
@@ -38,8 +38,6 @@ namespace ToioLabs.UI
         [SerializeField] private TextMeshProUGUI _calibrationStatusText;
 
         [Header("Mat Coordinate Settings (Standard Toio Mat)")]
-        [SerializeField] private float _panelWidth = 400f;
-        [SerializeField] private float _panelHeight = 400f;
         [SerializeField] private int _matMinX = 45;
         [SerializeField] private int _matMaxX = 455;
         [SerializeField] private int _matMinY = 45;
@@ -59,6 +57,10 @@ namespace ToioLabs.UI
         [SerializeField, Tooltip("Maximum scale for the live touch panel.")]
         private float _panelScaleMax = 3.0f;
 
+        [Header("Calibration Visual Feedback")]
+        [SerializeField, Tooltip("Visual feedback controller for calibration points.")]
+        private CalibrationVisualizer _calibVisualizer;
+
         private CubeManager _cubeManager;
         private Cube _connectedCube;
         private float _lastSendTime;
@@ -67,27 +69,37 @@ namespace ToioLabs.UI
         private float _nextPosUpdateTime;
 
         private CalibrationState _currentState = CalibrationState.None;
-        private System.Collections.Generic.List<Vector2Int> _calibrationPoints = new System.Collections.Generic.List<Vector2Int>();
-        private Vector2 _initialPanelSize;
-        private bool _panelLive;  // true after MakePanelLive completes
+        private readonly System.Collections.Generic.List<Vector2Int> _calibrationPoints =
+            new System.Collections.Generic.List<Vector2Int>();
 
-        [Header("Calibration Visual Feedback")]
-        [SerializeField, Tooltip("Visual feedback controller for calibration points.")]
-        private CalibrationVisualizer _calibVisualizer;
+        // Live panel state
+        private bool _panelLive;
+        private RectTransform _livePanelRect;        // Points to CalibFilledRect when live
+        private TouchInputReceiver _inputReceiver;   // Cached ref to the receiver on FilledRect
+        private RectTransform _originalPanelRect;    // Saved reference to restore on recalibration
+        private Transform _originalIndicatorParent;  // Saved parent of ToioIndicator
 
         // Static strings to avoid GC allocation
-        private const string INSTR_GUIDE = "Guide:\n[Click] Move Toio\n[Space] Calibrate\n[P] Patrol";
-        private const string INSTR_WAIT_FL = "Calibration:\nMove to Front-Left and press Space";
-        private const string INSTR_WAIT_FR = "Calibration:\nMove to Front-Right and press Space";
-        private const string INSTR_WAIT_BR = "Calibration:\nMove to Back-Right and press Space";
-        private const string INSTR_WAIT_BL = "Calibration:\nMove to Back-Left and press Space";
-        private const string INSTR_CALIB_DONE = "Calibration: Done!\nAspect ratio adjusted.";
+        private const string InstrGuide    = "Guide:\n[Click] Move Toio\n[Space] Calibrate\n[P] Patrol";
+        private const string InstrWaitFl   = "Calibration:\nMove to Front-Left and press Space";
+        private const string InstrWaitFr   = "Calibration:\nMove to Front-Right and press Space";
+        private const string InstrWaitBr   = "Calibration:\nMove to Back-Right and press Space";
+        private const string InstrWaitBl   = "Calibration:\nMove to Back-Left and press Space";
+        private const string InstrCalibDone = "Calibration: Done!\nClick the panel to move Toio.";
+
+        // Minimum mat coordinate to consider valid (avoids (0,0) false positive)
+        private const int MinValidCoord = 10;
 
         private void Awake()
         {
             if (_touchPanelRect == null) _touchPanelRect = GetComponent<RectTransform>();
             if (_touchPanelImage == null) _touchPanelImage = _touchPanelRect.GetComponent<Image>();
             if (_toioIndicator == null) _toioIndicator = transform.Find("ToioIndicator")?.GetComponent<RectTransform>();
+
+            // Save originals for recalibration
+            _originalPanelRect = _touchPanelRect;
+            if (_toioIndicator != null)
+                _originalIndicatorParent = _toioIndicator.parent;
 
             var dashboard = transform.parent;
             if (dashboard != null)
@@ -109,11 +121,6 @@ namespace ToioLabs.UI
 
         private void Start()
         {
-            // Capture initial panel size after layout pass
-            _initialPanelSize = _touchPanelRect.rect.size;
-            if (_initialPanelSize == Vector2.zero)
-                _initialPanelSize = _touchPanelRect.sizeDelta;
-
             ConnectAndCalibrate().Forget();
         }
 
@@ -138,11 +145,6 @@ namespace ToioLabs.UI
                 await _connectedCube.ConfigIDNotification(500, Cube.IDNotificationType.OnChanged);
                 await _connectedCube.ConfigIDMissedNotification(500);
 
-                // Re-capture size after all awaits (layout guaranteed)
-                _initialPanelSize = _touchPanelRect.rect.size;
-                if (_initialPanelSize == Vector2.zero)
-                    _initialPanelSize = _touchPanelRect.sizeDelta;
-
                 EnterCalibration();
             }
             else
@@ -166,23 +168,25 @@ namespace ToioLabs.UI
             }
 
             // Mouse-wheel scale for the live touch panel
-            if (_panelLive && _touchPanelRect != null)
+            if (_panelLive && _livePanelRect != null)
             {
                 float scroll = Input.mouseScrollDelta.y;
                 if (scroll != 0f)
                 {
-                    Vector3 s = _touchPanelRect.localScale;
+                    Vector3 s = _livePanelRect.localScale;
                     float newScale = Mathf.Clamp(s.x + scroll * _scrollSensitivity, _panelScaleMin, _panelScaleMax);
-                    _touchPanelRect.localScale = new Vector3(newScale, newScale, 1f);
+                    _livePanelRect.localScale = new Vector3(newScale, newScale, 1f);
                 }
             }
         }
 
         private void UpdateTelemetry()
         {
-            if (_toioIndicator != null)
+            // Update indicator position using the active panel rect
+            RectTransform activeRect = _panelLive && _livePanelRect != null ? _livePanelRect : _touchPanelRect;
+            if (_toioIndicator != null && activeRect != null)
             {
-                _toioIndicator.anchoredPosition = MapMatToLocal(_connectedCube.x, _connectedCube.y);
+                _toioIndicator.anchoredPosition = MapMatToLocal(activeRect, _connectedCube.x, _connectedCube.y);
             }
 
             if (Time.time >= _nextPosUpdateTime)
@@ -209,42 +213,38 @@ namespace ToioLabs.UI
             }
         }
 
-        private Vector2 MapMatToLocal(int matX, int matY)
+        /// <summary>
+        /// Maps mat coordinates to local-space position relative to the given RectTransform.
+        /// </summary>
+        private Vector2 MapMatToLocal(RectTransform rect, int matX, int matY)
         {
             float normX = Mathf.InverseLerp(_matMinX, _matMaxX, matX);
             float normY = Mathf.InverseLerp(_matMinY, _matMaxY, matY);
 
-            float w = _touchPanelRect.rect.width;
-            float h = _touchPanelRect.rect.height;
+            float w = rect.rect.width;
+            float h = rect.rect.height;
 
-            float uiX = Mathf.Lerp(-w / 2f, w / 2f, normX);
-            float uiY = Mathf.Lerp(-h / 2f, h / 2f, normY);
+            float uiX = Mathf.Lerp(-w * 0.5f, w * 0.5f, normX);
+            float uiY = Mathf.Lerp(-h * 0.5f, h * 0.5f, normY);
 
             return new Vector2(uiX, uiY);
         }
 
-        public void OnPointerDown(PointerEventData eventData)
-        {
-            ProcessInput(eventData.position, "PointerDown");
-        }
+        // ─────── Input from TouchInputReceiver ───────
 
-        public void OnDrag(PointerEventData eventData)
+        private void HandleTouchInput(Vector2 screenPos)
         {
-            ProcessInput(eventData.position, "Drag");
-        }
-
-        private void ProcessInput(Vector2 screenPos, string inputType)
-        {
-            if (_connectedCube == null || _touchPanelRect == null || _currentState != CalibrationState.Done) return;
+            if (_connectedCube == null || _currentState != CalibrationState.Done) return;
+            if (_livePanelRect == null) return;
 
             Vector2 localPoint;
-            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(_touchPanelRect, screenPos, null, out localPoint))
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(_livePanelRect, screenPos, null, out localPoint))
             {
-                float w = _touchPanelRect.rect.width;
-                float h = _touchPanelRect.rect.height;
+                float w = _livePanelRect.rect.width;
+                float h = _livePanelRect.rect.height;
 
-                float normX = Mathf.InverseLerp(-w / 2f, w / 2f, localPoint.x);
-                float normY = Mathf.InverseLerp(-h / 2f, h / 2f, localPoint.y);
+                float normX = Mathf.InverseLerp(-w * 0.5f, w * 0.5f, localPoint.x);
+                float normY = Mathf.InverseLerp(-h * 0.5f, h * 0.5f, localPoint.y);
 
                 int targetX = (int)Mathf.Lerp(_matMinX, _matMaxX, normX);
                 int targetY = (int)Mathf.Lerp(_matMinY, _matMaxY, normY);
@@ -280,12 +280,12 @@ namespace ToioLabs.UI
             if (_instructionText == null) return;
             switch (_currentState)
             {
-                case CalibrationState.None:      _instructionText.text = INSTR_GUIDE;     break;
-                case CalibrationState.WaitingFL: _instructionText.text = INSTR_WAIT_FL;  break;
-                case CalibrationState.WaitingFR: _instructionText.text = INSTR_WAIT_FR;  break;
-                case CalibrationState.WaitingBR: _instructionText.text = INSTR_WAIT_BR;  break;
-                case CalibrationState.WaitingBL: _instructionText.text = INSTR_WAIT_BL;  break;
-                case CalibrationState.Done:      _instructionText.text = INSTR_CALIB_DONE; break;
+                case CalibrationState.None:      _instructionText.text = InstrGuide;      break;
+                case CalibrationState.WaitingFL: _instructionText.text = InstrWaitFl;     break;
+                case CalibrationState.WaitingFR: _instructionText.text = InstrWaitFr;     break;
+                case CalibrationState.WaitingBR: _instructionText.text = InstrWaitBr;     break;
+                case CalibrationState.WaitingBL: _instructionText.text = InstrWaitBl;     break;
+                case CalibrationState.Done:      _instructionText.text = InstrCalibDone;  break;
             }
         }
 
@@ -297,25 +297,27 @@ namespace ToioLabs.UI
             _currentState = CalibrationState.WaitingFL;
             if (_calibVisualizer != null) _calibVisualizer.Reset();
             UpdateInstructions();
+            UpdateCalibrationStatus();
         }
 
         private void RecordCalibrationPoint()
         {
-            if (_connectedCube == null || (_connectedCube.x == 0 && _connectedCube.y == 0)) return;
+            if (_connectedCube == null) return;
             if (_currentState == CalibrationState.Done || _currentState == CalibrationState.None) return;
+
+            // Validate position is within a plausible range (not (0,0) or very low)
+            if (_connectedCube.x < MinValidCoord && _connectedCube.y < MinValidCoord) return;
 
             int idx = _calibrationPoints.Count;
             _calibrationPoints.Add(new Vector2Int(_connectedCube.x, _connectedCube.y));
             _connectedCube.TurnLedOn(255, 255, 0, 500);
 
-            // Visual feedback via CalibrationVisualizer
+            // Visual feedback: dot + edges
             if (_calibVisualizer != null)
             {
-                Vector2 panelPos = MapMatToLocal(_connectedCube.x, _connectedCube.y);
+                Vector2 panelPos = MapMatToLocal(_touchPanelRect, _connectedCube.x, _connectedCube.y);
                 _calibVisualizer.ShowDot(idx, panelPos);
 
-                // Draw edges as points accumulate
-                // Edge index mapping: 0=FL-FR, 1=FR-BR, 2=BR-BL, 3=BL-FL
                 if (idx == 1) _calibVisualizer.ShowEdge(0, 0, 1);       // FL → FR
                 else if (idx == 2) _calibVisualizer.ShowEdge(1, 1, 2);  // FR → BR
                 else if (idx == 3)
@@ -342,8 +344,6 @@ namespace ToioLabs.UI
             UpdateInstructions();
             UpdateCalibrationStatus();
         }
-
-
 
         private void UpdateCalibrationStatus()
         {
@@ -372,34 +372,88 @@ namespace ToioLabs.UI
 
             _matMinX = minX; _matMaxX = maxX; _matMinY = minY; _matMaxY = maxY;
 
-            // Note: panel is no longer pre-resized here.
-            // The CalibFilledRect (created in ShowFilledRect) defines the live panel shape.
-
             _connectedCube.TurnLedOn(0, 255, 0, 1000);
 
-            // Fade out dots/edges, keep filled rect — swap _touchPanelRect to it
+            // Fade out dots/edges, keep filled rect, then swap to live panel
             if (_calibVisualizer != null)
             {
                 _calibVisualizer.ShowFilledRect();
-                _calibVisualizer.MakePanelLive(liveRect =>
-                {
-                    if (liveRect != null)
-                    {
-                        _touchPanelRect = liveRect;
-                        var img = liveRect.GetComponent<Image>();
-                        if (img != null) img.raycastTarget = true;
-                    }
-                    _panelLive = true;
-                });
+                _calibVisualizer.MakePanelLive(OnPanelLive);
             }
             else
             {
+                // Fallback: use original panel
+                _panelLive = true;
                 if (_touchPanelImage != null) _touchPanelImage.enabled = true;
             }
 
 #if UNITY_EDITOR
-            Debug.Log($"[ToioUI] Calibration done. Mat: X[{_matMinX},{_matMaxX}] Y[{_matMinY},{_matMaxY}]. Panel: {_touchPanelRect.sizeDelta}");
+            Debug.Log($"[ToioUI] Calibration done. Mat: X[{_matMinX},{_matMaxX}] Y[{_matMinY},{_matMaxY}]");
 #endif
+        }
+
+        private void OnPanelLive(RectTransform liveRect)
+        {
+            if (liveRect == null)
+            {
+                _panelLive = true;
+                return;
+            }
+
+            _livePanelRect = liveRect;
+
+            // Subscribe to touch events from the TouchInputReceiver
+            _inputReceiver = liveRect.GetComponent<TouchInputReceiver>();
+            if (_inputReceiver != null)
+            {
+                _inputReceiver.OnInput += HandleTouchInput;
+            }
+
+            // Reparent ToioIndicator into FilledRect so coordinates match
+            if (_toioIndicator != null)
+            {
+                _toioIndicator.SetParent(liveRect, false);
+                _toioIndicator.anchoredPosition = Vector2.zero;
+            }
+
+            _panelLive = true;
+        }
+
+        /// <summary>
+        /// Public method for recalibration. Called by RecalibrateButton.
+        /// Resets all live panel state and re-enters calibration mode.
+        /// </summary>
+        public void StartRecalibration()
+        {
+            if (_connectedCube == null) return;
+
+            // Unsubscribe from the old receiver
+            if (_inputReceiver != null)
+            {
+                _inputReceiver.OnInput -= HandleTouchInput;
+                _inputReceiver = null;
+            }
+
+            // Return ToioIndicator to its original parent
+            if (_toioIndicator != null && _originalIndicatorParent != null)
+            {
+                _toioIndicator.SetParent(_originalIndicatorParent, false);
+                _toioIndicator.anchoredPosition = Vector2.zero;
+            }
+
+            // Restore original panel reference
+            _livePanelRect = null;
+            _panelLive = false;
+
+            // Reset visualizer (destroys CalibFilledRect safely)
+            if (_calibVisualizer != null)
+                _calibVisualizer.Reset();
+
+            // Hide fallback panel image
+            if (_touchPanelImage != null)
+                _touchPanelImage.enabled = false;
+
+            EnterCalibration();
         }
     }
 }

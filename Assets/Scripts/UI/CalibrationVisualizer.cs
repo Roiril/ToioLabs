@@ -1,14 +1,13 @@
 using UnityEngine;
 using UnityEngine.UI;
-using Cysharp.Threading.Tasks;
-using System.Threading;
 
 namespace ToioLabs.UI
 {
     /// <summary>
     /// "Connect the Dots" calibration visual feedback.
-    /// After completion, dots and edges fade out while the filled rectangle
-    /// remains as the new touch input area (handed off via MakePanelLive).
+    /// After 4 points are recorded, dots/edges fade out and the filled
+    /// rectangle remains as the live touch panel (handed off via MakePanelLive).
+    /// A TouchInputReceiver is automatically added to the filled rect.
     /// </summary>
     public class CalibrationVisualizer : MonoBehaviour
     {
@@ -25,9 +24,6 @@ namespace ToioLabs.UI
         [SerializeField, Tooltip("Thickness of the edge lines.")]
         private float _edgeThickness = 2f;
 
-        [SerializeField, Tooltip("Duration of dot fade-in (seconds).")]
-        private float _dotFadeInDuration = 0.3f;
-
         [SerializeField, Tooltip("Duration of pulse ring expansion (seconds).")]
         private float _pulseDuration = 0.5f;
 
@@ -40,15 +36,15 @@ namespace ToioLabs.UI
         [SerializeField, Tooltip("Duration of filled rect fade-in (seconds).")]
         private float _rectFadeDuration = 0.4f;
 
-        [SerializeField, Tooltip("Duration of transition out (seconds).")]
-        private float _transitionOutDuration = 0.5f;
+        [SerializeField, Tooltip("Duration of decoration fade-out (seconds).")]
+        private float _fadeDecorationsDuration = 0.4f;
 
-        // Runtime state
+        // Runtime visual elements
         private readonly RectTransform[] _dots = new RectTransform[4];
         private readonly CanvasGroup[] _dotGroups = new CanvasGroup[4];
         private readonly RectTransform[] _pulseRings = new RectTransform[4];
         private readonly CanvasGroup[] _pulseGroups = new CanvasGroup[4];
-        private readonly RectTransform[] _edges = new RectTransform[4]; // FL-FR, FR-BR, BR-BL, BL-FL
+        private readonly RectTransform[] _edges = new RectTransform[4];
         private readonly Image[] _edgeImages = new Image[4];
         private RectTransform _filledRect;
         private Image _filledRectImage;
@@ -56,26 +52,39 @@ namespace ToioLabs.UI
         private readonly Vector2[] _dotPositions = new Vector2[4];
         private int _dotCount;
 
-        // Animation tracking (no coroutines to avoid GC)
+        // Pulse animation (single at a time)
         private bool _animatingPulse;
         private int _pulseIndex;
         private float _pulseStartTime;
 
+        // Edge animation queue — supports sequential playback
+        private struct EdgeAnimRequest
+        {
+            public int EdgeIndex;
+            public Vector2 From;
+            public Vector2 To;
+        }
+        private readonly System.Collections.Generic.Queue<EdgeAnimRequest> _edgeQueue =
+            new System.Collections.Generic.Queue<EdgeAnimRequest>(4);
         private bool _animatingEdge;
-        private int _edgeIndex;
-        private float _edgeStartTime;
+        private int _currentEdgeIndex;
         private Vector2 _edgeFrom;
         private Vector2 _edgeTo;
+        private float _edgeStartTime;
 
+        // Filled rect fade
         private bool _animatingRectFade;
         private float _rectFadeStartTime;
 
+        // Decoration fade-out
         private bool _animatingFadeDecorations;
         private float _fadeDecorationsStartTime;
-        private float _fadeDecorationsDuration = 0.4f;
 
-        // Callback after MakePanelLive completes — passes FilledRect RT
+        // Callback after MakePanelLive completes
         private System.Action<RectTransform> _onPanelReady;
+
+        // Cached reference to the TouchInputReceiver added to FilledRect
+        private TouchInputReceiver _inputReceiver;
 
         /// <summary>The RectTransform of the filled calibration rect (valid after ShowFilledRect).</summary>
         public RectTransform FilledRect => _filledRect;
@@ -85,7 +94,6 @@ namespace ToioLabs.UI
             if (_parentRect == null)
                 _parentRect = GetComponent<RectTransform>();
 
-            // Create an overlay CanvasGroup for the whole visualizer
             _overlayGroup = gameObject.GetComponent<CanvasGroup>();
             if (_overlayGroup == null)
                 _overlayGroup = gameObject.AddComponent<CanvasGroup>();
@@ -104,9 +112,7 @@ namespace ToioLabs.UI
 
         // ─────── Public API ───────
 
-        /// <summary>
-        /// Show a dot at the given panel-local position with a pulse animation.
-        /// </summary>
+        /// <summary>Show a dot at the given panel-local position with a pulse animation.</summary>
         public void ShowDot(int index, Vector2 panelLocalPos)
         {
             if (index < 0 || index >= 4) return;
@@ -114,24 +120,21 @@ namespace ToioLabs.UI
             _dotPositions[index] = panelLocalPos;
             _dotCount = Mathf.Max(_dotCount, index + 1);
 
-            // Create dot
             if (_dots[index] == null)
                 CreateDot(index);
 
             _dots[index].anchoredPosition = panelLocalPos;
             _dots[index].gameObject.SetActive(true);
 
-            // Fade in dot
             if (_dotGroups[index] != null)
                 _dotGroups[index].alpha = 1f;
 
-            // Start pulse
             StartPulse(index);
         }
 
         /// <summary>
-        /// Show an edge line between two recorded dot positions.
-        /// Edge indices: 0=FL-FR, 1=FR-BR, 2=BR-BL, 3=BL-FL
+        /// Enqueue an edge animation between two dot positions.
+        /// Multiple edges are played sequentially (no overwrite).
         /// </summary>
         public void ShowEdge(int edgeIndex, int fromDotIndex, int toDotIndex)
         {
@@ -142,21 +145,30 @@ namespace ToioLabs.UI
             if (_edges[edgeIndex] == null)
                 CreateEdge(edgeIndex);
 
-            _edgeFrom = _dotPositions[fromDotIndex];
-            _edgeTo = _dotPositions[toDotIndex];
-
-            // Position edge at 'from', will animate to full length
-            PositionEdge(edgeIndex, _edgeFrom, _edgeFrom);
+            // Position at start point with zero length
+            PositionEdge(edgeIndex, _dotPositions[fromDotIndex], _dotPositions[fromDotIndex]);
             _edges[edgeIndex].gameObject.SetActive(true);
 
-            _animatingEdge = true;
-            _edgeIndex = edgeIndex;
-            _edgeStartTime = Time.time;
+            var request = new EdgeAnimRequest
+            {
+                EdgeIndex = edgeIndex,
+                From = _dotPositions[fromDotIndex],
+                To = _dotPositions[toDotIndex]
+            };
+
+            if (!_animatingEdge)
+            {
+                // Start immediately
+                StartEdgeAnim(request);
+            }
+            else
+            {
+                // Queue for later
+                _edgeQueue.Enqueue(request);
+            }
         }
 
-        /// <summary>
-        /// Show a semi-transparent filled rectangle across all 4 calibration points.
-        /// </summary>
+        /// <summary>Show a semi-transparent filled rectangle across all 4 calibration points.</summary>
         public void ShowFilledRect()
         {
             if (_dotCount < 4) return;
@@ -164,11 +176,15 @@ namespace ToioLabs.UI
             if (_filledRect == null)
                 CreateFilledRect();
 
-            // Calculate bounding rect from the 4 dot positions
-            float minX = Mathf.Min(_dotPositions[0].x, Mathf.Min(_dotPositions[1].x, Mathf.Min(_dotPositions[2].x, _dotPositions[3].x)));
-            float maxX = Mathf.Max(_dotPositions[0].x, Mathf.Max(_dotPositions[1].x, Mathf.Max(_dotPositions[2].x, _dotPositions[3].x)));
-            float minY = Mathf.Min(_dotPositions[0].y, Mathf.Min(_dotPositions[1].y, Mathf.Min(_dotPositions[2].y, _dotPositions[3].y)));
-            float maxY = Mathf.Max(_dotPositions[0].y, Mathf.Max(_dotPositions[1].y, Mathf.Max(_dotPositions[2].y, _dotPositions[3].y)));
+            float minX = _dotPositions[0].x, maxX = _dotPositions[0].x;
+            float minY = _dotPositions[0].y, maxY = _dotPositions[0].y;
+            for (int i = 1; i < 4; i++)
+            {
+                if (_dotPositions[i].x < minX) minX = _dotPositions[i].x;
+                if (_dotPositions[i].x > maxX) maxX = _dotPositions[i].x;
+                if (_dotPositions[i].y < minY) minY = _dotPositions[i].y;
+                if (_dotPositions[i].y > maxY) maxY = _dotPositions[i].y;
+            }
 
             float cx = (minX + maxX) * 0.5f;
             float cy = (minY + maxY) * 0.5f;
@@ -176,7 +192,6 @@ namespace ToioLabs.UI
             _filledRect.sizeDelta = new Vector2(maxX - minX, maxY - minY);
             _filledRect.gameObject.SetActive(true);
 
-            // Animate alpha
             _filledRectImage.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0f);
             _animatingRectFade = true;
             _rectFadeStartTime = Time.time;
@@ -184,7 +199,8 @@ namespace ToioLabs.UI
 
         /// <summary>
         /// Fades out dots and edges, keeps the filled rect visible.
-        /// Calls onReady(filledRectRT) when the fade is done.
+        /// Adds a TouchInputReceiver to the filled rect.
+        /// Calls onReady(filledRectRT) when ready.
         /// </summary>
         public void MakePanelLive(System.Action<RectTransform> onReady)
         {
@@ -193,6 +209,7 @@ namespace ToioLabs.UI
                 onReady?.Invoke(null);
                 return;
             }
+
             // Ensure the rect is fully visible
             if (_filledRectImage != null)
                 _filledRectImage.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0.18f);
@@ -202,15 +219,15 @@ namespace ToioLabs.UI
             _fadeDecorationsStartTime = Time.time;
         }
 
-        /// <summary>
-        /// Immediately remove all visual elements and reset state.
-        /// </summary>
+        /// <summary>Immediately remove all visual elements and reset state.</summary>
         public void Reset()
         {
             _animatingPulse = false;
             _animatingEdge = false;
             _animatingRectFade = false;
             _animatingFadeDecorations = false;
+            _edgeQueue.Clear();
+            _onPanelReady = null;
             _dotCount = 0;
 
             for (int i = 0; i < 4; i++)
@@ -223,6 +240,13 @@ namespace ToioLabs.UI
                 _edgeImages[i] = null;
             }
 
+            // Destroy TouchInputReceiver before destroying FilledRect
+            if (_inputReceiver != null)
+            {
+                Destroy(_inputReceiver);
+                _inputReceiver = null;
+            }
+
             if (_filledRect != null)
             {
                 Destroy(_filledRect.gameObject);
@@ -231,7 +255,11 @@ namespace ToioLabs.UI
             }
 
             if (_overlayGroup != null)
+            {
                 _overlayGroup.alpha = 1f;
+                _overlayGroup.blocksRaycasts = false;
+                _overlayGroup.interactable = false;
+            }
         }
 
         // ─────── Creation Helpers ───────
@@ -248,7 +276,6 @@ namespace ToioLabs.UI
 
             var img = go.GetComponent<Image>();
             img.color = _accentColor;
-            // Make it a circle by using a round sprite if available, otherwise square is fine
             img.raycastTarget = false;
 
             var cg = go.GetComponent<CanvasGroup>();
@@ -258,7 +285,6 @@ namespace ToioLabs.UI
             _dots[index] = rt;
             _dotGroups[index] = cg;
 
-            // Create pulse ring as a child
             CreatePulseRing(index, rt);
         }
 
@@ -294,7 +320,7 @@ namespace ToioLabs.UI
 
             var rt = go.GetComponent<RectTransform>();
             rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-            rt.pivot = new Vector2(0f, 0.5f); // pivot at left-center for stretch animation
+            rt.pivot = new Vector2(0f, 0.5f);
 
             var img = go.GetComponent<Image>();
             img.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0.6f);
@@ -310,8 +336,8 @@ namespace ToioLabs.UI
         {
             var go = new GameObject("CalibFilledRect", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
             go.transform.SetParent(_parentRect, false);
-            // Place behind dots (first sibling)
-            go.transform.SetAsFirstSibling();
+            // Place as last sibling so raycasts hit it first
+            go.transform.SetAsLastSibling();
 
             var rt = go.GetComponent<RectTransform>();
             rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
@@ -319,7 +345,7 @@ namespace ToioLabs.UI
 
             var img = go.GetComponent<Image>();
             img.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0f);
-            img.raycastTarget = false;
+            img.raycastTarget = false; // enabled later in MakePanelLive
 
             _filledRect = rt;
             _filledRectImage = img;
@@ -345,8 +371,6 @@ namespace ToioLabs.UI
         {
             float elapsed = Time.time - _pulseStartTime;
             float t = Mathf.Clamp01(elapsed / _pulseDuration);
-
-            // Ease out
             float eased = 1f - (1f - t) * (1f - t);
 
             float scale = Mathf.Lerp(1f, _pulseMaxScale, eased);
@@ -366,20 +390,35 @@ namespace ToioLabs.UI
             }
         }
 
+        private void StartEdgeAnim(EdgeAnimRequest req)
+        {
+            _currentEdgeIndex = req.EdgeIndex;
+            _edgeFrom = req.From;
+            _edgeTo = req.To;
+            _edgeStartTime = Time.time;
+            _animatingEdge = true;
+        }
+
         private void UpdateEdgeAnimation()
         {
             float elapsed = Time.time - _edgeStartTime;
             float t = Mathf.Clamp01(elapsed / _edgeAnimDuration);
-
-            // Ease out quad
             float eased = 1f - (1f - t) * (1f - t);
 
             Vector2 currentEnd = Vector2.Lerp(_edgeFrom, _edgeTo, eased);
-            PositionEdge(_edgeIndex, _edgeFrom, currentEnd);
+            PositionEdge(_currentEdgeIndex, _edgeFrom, currentEnd);
 
             if (t >= 1f)
             {
-                _animatingEdge = false;
+                // Process next in queue
+                if (_edgeQueue.Count > 0)
+                {
+                    StartEdgeAnim(_edgeQueue.Dequeue());
+                }
+                else
+                {
+                    _animatingEdge = false;
+                }
             }
         }
 
@@ -388,15 +427,12 @@ namespace ToioLabs.UI
             float elapsed = Time.time - _rectFadeStartTime;
             float t = Mathf.Clamp01(elapsed / _rectFadeDuration);
 
-            // Target alpha: 0.1 (subtle fill)
             float alpha = Mathf.Lerp(0f, 0.1f, t);
             if (_filledRectImage != null)
                 _filledRectImage.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, alpha);
 
             if (t >= 1f)
-            {
                 _animatingRectFade = false;
-            }
         }
 
         private void UpdateFadeDecorationsAnimation()
@@ -405,7 +441,6 @@ namespace ToioLabs.UI
             float t = Mathf.Clamp01(elapsed / _fadeDecorationsDuration);
             float alpha = Mathf.Lerp(1f, 0f, t);
 
-            // Fade dots and edges only
             for (int i = 0; i < 4; i++)
             {
                 if (_dotGroups[i] != null) _dotGroups[i].alpha = alpha;
@@ -419,7 +454,7 @@ namespace ToioLabs.UI
             if (t >= 1f)
             {
                 _animatingFadeDecorations = false;
-                // Destroy dots and edges, keep filled rect
+
                 for (int i = 0; i < 4; i++)
                 {
                     DestroyChild(ref _dots[i]);
@@ -429,12 +464,21 @@ namespace ToioLabs.UI
                     DestroyChild(ref _edges[i]);
                     _edgeImages[i] = null;
                 }
-                // Allow raycasts on FilledRect (CanvasGroup.interactable=false blocked them)
+
+                // Enable raycasts on overlay so FilledRect receives clicks
                 if (_overlayGroup != null)
                 {
                     _overlayGroup.interactable = true;
                     _overlayGroup.blocksRaycasts = true;
                 }
+
+                // Add TouchInputReceiver to FilledRect
+                if (_filledRect != null && _inputReceiver == null)
+                {
+                    _inputReceiver = _filledRect.gameObject.AddComponent<TouchInputReceiver>();
+                    _filledRectImage.raycastTarget = true;
+                }
+
                 _onPanelReady?.Invoke(_filledRect);
                 _onPanelReady = null;
             }
