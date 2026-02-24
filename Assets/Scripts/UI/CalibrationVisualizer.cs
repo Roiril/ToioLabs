@@ -47,7 +47,7 @@ namespace ToioLabs.UI
         private readonly RectTransform[] _edges = new RectTransform[4];
         private readonly Image[] _edgeImages = new Image[4];
         private RectTransform _filledRect;
-        private Image _filledRectImage;
+        private QuadrilateralGraphic _filledRectGraphic;
         private CanvasGroup _overlayGroup;
         private readonly Vector2[] _dotPositions = new Vector2[4];
         private int _dotCount;
@@ -176,23 +176,11 @@ namespace ToioLabs.UI
             if (_filledRect == null)
                 CreateFilledRect();
 
-            float minX = _dotPositions[0].x, maxX = _dotPositions[0].x;
-            float minY = _dotPositions[0].y, maxY = _dotPositions[0].y;
-            for (int i = 1; i < 4; i++)
-            {
-                if (_dotPositions[i].x < minX) minX = _dotPositions[i].x;
-                if (_dotPositions[i].x > maxX) maxX = _dotPositions[i].x;
-                if (_dotPositions[i].y < minY) minY = _dotPositions[i].y;
-                if (_dotPositions[i].y > maxY) maxY = _dotPositions[i].y;
-            }
-
-            float cx = (minX + maxX) * 0.5f;
-            float cy = (minY + maxY) * 0.5f;
-            _filledRect.anchoredPosition = new Vector2(cx, cy);
-            _filledRect.sizeDelta = new Vector2(maxX - minX, maxY - minY);
+            // Set actual 4 corners
+            _filledRectGraphic.SetVertices(_dotPositions[0], _dotPositions[1], _dotPositions[2], _dotPositions[3]);
             _filledRect.gameObject.SetActive(true);
 
-            _filledRectImage.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0f);
+            _filledRectGraphic.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0f);
             _animatingRectFade = true;
             _rectFadeStartTime = Time.time;
         }
@@ -211,8 +199,8 @@ namespace ToioLabs.UI
             }
 
             // Ensure the rect is fully visible
-            if (_filledRectImage != null)
-                _filledRectImage.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0.18f);
+            if (_filledRectGraphic != null)
+                _filledRectGraphic.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0.18f);
 
             _onPanelReady = onReady;
             _animatingFadeDecorations = true;
@@ -251,7 +239,7 @@ namespace ToioLabs.UI
             {
                 Destroy(_filledRect.gameObject);
                 _filledRect = null;
-                _filledRectImage = null;
+                _filledRectGraphic = null;
             }
 
             if (_overlayGroup != null)
@@ -334,21 +322,24 @@ namespace ToioLabs.UI
 
         private void CreateFilledRect()
         {
-            var go = new GameObject("CalibFilledRect", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+            var go = new GameObject("CalibFilledRect", typeof(RectTransform), typeof(CanvasRenderer), typeof(QuadrilateralGraphic));
             go.transform.SetParent(_parentRect, false);
             // Place as last sibling so raycasts hit it first
             go.transform.SetAsLastSibling();
 
             var rt = go.GetComponent<RectTransform>();
-            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.offsetMin = Vector2.zero;
+            rt.offsetMax = Vector2.zero;
             rt.pivot = new Vector2(0.5f, 0.5f);
 
-            var img = go.GetComponent<Image>();
-            img.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0f);
-            img.raycastTarget = false; // enabled later in MakePanelLive
+            var graphic = go.GetComponent<QuadrilateralGraphic>();
+            graphic.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, 0f);
+            graphic.raycastTarget = false; // enabled later in MakePanelLive
 
             _filledRect = rt;
-            _filledRectImage = img;
+            _filledRectGraphic = graphic;
 
             go.SetActive(false);
         }
@@ -428,8 +419,8 @@ namespace ToioLabs.UI
             float t = Mathf.Clamp01(elapsed / _rectFadeDuration);
 
             float alpha = Mathf.Lerp(0f, 0.1f, t);
-            if (_filledRectImage != null)
-                _filledRectImage.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, alpha);
+            if (_filledRectGraphic != null)
+                _filledRectGraphic.color = new Color(_accentColor.r, _accentColor.g, _accentColor.b, alpha);
 
             if (t >= 1f)
                 _animatingRectFade = false;
@@ -476,7 +467,7 @@ namespace ToioLabs.UI
                 if (_filledRect != null && _inputReceiver == null)
                 {
                     _inputReceiver = _filledRect.gameObject.AddComponent<TouchInputReceiver>();
-                    _filledRectImage.raycastTarget = true;
+                    _filledRectGraphic.raycastTarget = true;
                 }
 
                 _onPanelReady?.Invoke(_filledRect);
@@ -506,6 +497,54 @@ namespace ToioLabs.UI
                 Destroy(rt.gameObject);
                 rt = null;
             }
+        }
+    }
+
+    public class QuadrilateralGraphic : MaskableGraphic, ICanvasRaycastFilter
+    {
+        private Vector2[] _verts = new Vector2[4];
+
+        public void SetVertices(Vector2 p0, Vector2 p1, Vector2 p2, Vector2 p3)
+        {
+            _verts[0] = p0;
+            _verts[1] = p1;
+            _verts[2] = p2;
+            _verts[3] = p3;
+            SetVerticesDirty();
+        }
+
+        protected override void OnPopulateMesh(VertexHelper vh)
+        {
+            vh.Clear();
+
+            UIVertex vert = UIVertex.simpleVert;
+            vert.color = color;
+
+            for (int i = 0; i < 4; i++)
+            {
+                vert.position = _verts[i];
+                vh.AddVert(vert);
+            }
+
+            vh.AddTriangle(0, 1, 2);
+            vh.AddTriangle(2, 3, 0);
+        }
+
+        public bool IsRaycastLocationValid(Vector2 sp, Camera eventCamera)
+        {
+            if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(rectTransform, sp, eventCamera, out Vector2 localPoint))
+                return false;
+
+            bool inside = false;
+            for (int i = 0, j = 3; i < 4; j = i++)
+            {
+                if (((_verts[i].y > localPoint.y) != (_verts[j].y > localPoint.y)) &&
+                    (localPoint.x < (_verts[j].x - _verts[i].x) * (localPoint.y - _verts[i].y) / (_verts[j].y - _verts[i].y) + _verts[i].x))
+                {
+                    inside = !inside;
+                }
+            }
+            return inside;
         }
     }
 }

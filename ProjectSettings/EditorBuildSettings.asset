@@ -6,6 +6,6 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
-    path: Assets/Scenes/Toioio.unity
+    path: Assets/Scenes/LabMain.unity
     guid: c55d922a8a9684c45871aa50ac84199d
   m_configObjects: {}

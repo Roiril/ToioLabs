@@ -225,7 +225,8 @@ namespace ToioLabs.UI
             float h = rect.rect.height;
 
             float uiX = Mathf.Lerp(-w * 0.5f, w * 0.5f, normX);
-            float uiY = Mathf.Lerp(-h * 0.5f, h * 0.5f, normY);
+            // Reverse Y mapping: Top of UI (h * 0.5f) corresponds to small Y (Far)
+            float uiY = Mathf.Lerp(h * 0.5f, -h * 0.5f, normY);
 
             return new Vector2(uiX, uiY);
         }
@@ -244,7 +245,8 @@ namespace ToioLabs.UI
                 float h = _livePanelRect.rect.height;
 
                 float normX = Mathf.InverseLerp(-w * 0.5f, w * 0.5f, localPoint.x);
-                float normY = Mathf.InverseLerp(-h * 0.5f, h * 0.5f, localPoint.y);
+                // Inverse coordinate mapping for Y to match MapMatToLocal
+                float normY = Mathf.InverseLerp(h * 0.5f, -h * 0.5f, localPoint.y);
 
                 int targetX = (int)Mathf.Lerp(_matMinX, _matMaxX, normX);
                 int targetY = (int)Mathf.Lerp(_matMinY, _matMaxY, normY);
@@ -365,12 +367,9 @@ namespace ToioLabs.UI
             if (_calibrationPoints.Count < 4) return;
 
             // FL:0, FR:1, BR:2, BL:3
-            int minX = Mathf.Min(_calibrationPoints[0].x, _calibrationPoints[3].x);
-            int maxX = Mathf.Max(_calibrationPoints[1].x, _calibrationPoints[2].x);
-            int minY = Mathf.Min(_calibrationPoints[0].y, _calibrationPoints[1].y);
-            int maxY = Mathf.Max(_calibrationPoints[2].y, _calibrationPoints[3].y);
-
-            _matMinX = minX; _matMaxX = maxX; _matMinY = minY; _matMaxY = maxY;
+            // We NO LONGER update _matMinX, etc. here because CalibrationVisualizer now uses a
+            // full-size QuadrilateralGraphic that perfectly matches the default mat coordinate scale.
+            // Updating them would break the visual-to-physical coordinate mapping.
 
             _connectedCube.TurnLedOn(0, 255, 0, 1000);
 
@@ -425,6 +424,11 @@ namespace ToioLabs.UI
         /// </summary>
         public void StartRecalibration()
         {
+            if (EventSystem.current != null)
+            {
+                EventSystem.current.SetSelectedGameObject(null);
+            }
+
             if (_connectedCube == null) return;
 
             // Unsubscribe from the old receiver

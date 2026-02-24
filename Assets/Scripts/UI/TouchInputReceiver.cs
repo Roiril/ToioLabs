@@ -8,9 +8,9 @@ namespace ToioLabs.UI
     /// Thin component attached to the calibration FilledRect.
     /// Receives pointer events and forwards screen-space positions
     /// to subscribers via the OnInput event.
-    /// Requires an Image with raycastTarget=true on the same GameObject.
+    /// Requires an Graphic with raycastTarget=true on the same GameObject.
     /// </summary>
-    [RequireComponent(typeof(Image))]
+    [RequireComponent(typeof(Graphic))]
     public class TouchInputReceiver : MonoBehaviour, IPointerDownHandler, IDragHandler
     {
         /// <summary>Fired on pointer-down and drag with screen-space position.</summary>

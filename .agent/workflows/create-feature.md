@@ -4,383 +4,200 @@ description: MCPツールを活用した新規機能・UIの自律的な作成�
 
 # /create-feature — 新規機能作成ワークフロー
 
-ユーザーから新規機能の作成依頼を受けた際に、MCPツールを使用してスクリプト作成からシーン組み込み・検証までを一気通貫で完了させる手順。
+ユーザーから新規機能の作成依頼を受けた時に、**何を考え、どの順番で何をすればよいか** を完全に決めたフロー。上から順に実行する。
 
 > **前提:** `.agent/rules/unity-always-on-rules.md` と `.agent/rules/unity-mcp-guidelines.md` の全ルールに常に従うこと。
 
 ---
 
-## Step 1: 要件定義と現状確認
-
-ユーザーの要望を分析し、作業開始前にシーンと既存アセットの現状を MCP ツールで確認する。**推測で作業を開始してはならない。**
-
-### 1-1. アクティブシーンの構造を確認する
+## 全体フロー図
 
 ```
-ツール: manage_scene
-パラメータ:
-  action: "get_hierarchy"
-  max_depth: 3
-  include_transform: true
+ユーザーの依頼受信
+    │
+    ▼
+Step 1: 現状確認（推測禁止、MCP で調べる）
+    │
+    ├─ 不明点あり？ → YES → ユーザーに確認（MCP で調べられないことだけ）
+    │                  ╰─ 回答を受けたら Step 1 に戻る
+    │
+    └─ NO → Step 2
+    ▼
+Step 2: コード生成（ルール準拠チェック → ファイル保存 → 構文検証）
+    │
+    ├─ validate_script でエラー？ → YES → 修正して再保存 → 再検証
+    │
+    └─ NO → Step 3
+    ▼
+Step 3: シーン組み込み（GameObject 作成 → コンポーネント追加）
+    │
+    ▼
+Step 4: 参照とパラメータ設定
+    │
+    ▼
+Step 5: 検証と報告（コンパイル確認 → コンソールチェック → スクリーンショット → 保存 → 報告）
+    │
+    ├─ コンパイルエラー？ → YES → Step 2 に戻る
+    ├─ ランタイムエラー？ → YES → /debug-unity に切り替え
+    │
+    └─ NO → ユーザーに報告して完了 ✅
 ```
-
-以下の有無を記録すること：
-- `Canvas` (UI 構築に必要)
-- `EventSystem` (UI インタラクションに必要)
-- toio 関連の既存 GameObject (`CubeManager` をアタッチしたオブジェクト等)
-- `Main Camera`, `Directional Light` 等の基本オブジェクト
-
-### 1-2. UI 機能の場合 — Canvas と EventSystem の存在を検索する
-
-```
-ツール: find_gameobjects
-パラメータ:
-  search_term: "Canvas"
-  search_method: "by_component"
-```
-
-```
-ツール: find_gameobjects
-パラメータ:
-  search_term: "EventSystem"
-  search_method: "by_component"
-```
-
-- Canvas が存在しない場合 → Step 3 で新規作成する（フラグを立てる）
-- EventSystem が存在しない場合 → Step 3 で新規作成する（フラグを立てる）
-
-### 1-3. toio 制御機能の場合 — 既存のコントローラーを確認する
-
-```
-ツール: manage_asset
-パラメータ:
-  action: "search"
-  path: "Assets/Scripts"
-  search_pattern: "*.cs"
-```
-
-- 既存の toio 制御スクリプトの接続パターンやコールバック登録方式を確認し、新規スクリプトで踏襲する。
-- 重複する機能がないか確認する。重複する場合はユーザーに報告して判断を仰ぐ。
-
-### 1-4. 要件の整理と確認
-
-以下を決定してから次のステップに進むこと：
-- **作成するスクリプトのクラス名** (PascalCase)
-- **名前空間** (`ToioLabs.Control`, `ToioLabs.UI` 等)
-- **保存先フォルダパス** (`Assets/Scripts/Control/`, `Assets/Scripts/UI/` 等)
-- **必要な GameObject とコンポーネントの一覧**
-
-不明な点がある場合のみユーザーに確認する。MCP で調べられる情報は聞き返さない。
 
 ---
 
-## Step 2: ルールに準拠したスクリプト生成
+## Step 1: 現状確認
 
-`unity-always-on-rules.md` に完全準拠した C# コードを生成し、MCP ツールでファイルとして保存する。
-
-### 2-1. コードを生成する
-
-以下の全項目を満たすコードを生成すること。1つでも違反があれば修正してから保存する。
-
-- [ ] `namespace ToioLabs.XXX { }` で囲まれている
-- [ ] `Update` / `FixedUpdate` / `LateUpdate` 内でヒープアロケーションが発生していない
-- [ ] `Debug.Log` が `#if UNITY_EDITOR` または `[System.Diagnostics.Conditional("UNITY_EDITOR")]` で保護されている
-- [ ] `using System.Threading.Tasks;` が含まれていない（UniTask を使用）
-- [ ] すべての非同期メソッド（Unity イベント関数を除く）が `async UniTask` で `CancellationToken` を受け取っている
-- [ ] Inspector 変数が `[SerializeField] private` + `[Header]` + `[Tooltip]` になっている
-- [ ] private フィールドが `_camelCase` で命名されている
-- [ ] `Time.time % N` パターンが使われていない（次回時刻キャッシュ方式を使用）
-- [ ] 重い処理が `Update()` から分離されている
-
-### 2-2. ファイルとして保存する
+### 思考フロー: 何を確認すればよいか
 
 ```
-ツール: create_script
-パラメータ:
-  path: "Assets/Scripts/<サブフォルダ>/<クラス名>.cs"
-  contents: "<生成したC#コード>"
+ユーザーの依頼を読んだ
+  │
+  ├─ Q1: 何を作るのか？ UI か、制御ロジックか、データ処理か？
+  │    └─ これを決めないと名前空間もフォルダも決められない → 必ず最初に判断する
+  │
+  ├─ Q2: シーンの現在の構造を知っているか？
+  │    ├─ NO → 実行: manage_scene (action: get_hierarchy, max_depth: 3, include_transform: true)
+  │    └─ YES → 次に進む
+  │
+  ├─ Q3: UI 機能か？
+  │    ├─ YES → Canvas と EventSystem を検索する
+  │    │    └─ find_gameobjects (search_term: "Canvas", search_method: "by_component")
+  │    │    └─ find_gameobjects (search_term: "EventSystem", search_method: "by_component")
+  │    │    結果:
+  │    │    ├─ Canvas がない → Step 3 で作る（フラグを立てておく）
+  │    │    └─ EventSystem がない → Step 3 で作る（フラグを立てておく）
+  │    └─ NO → 次に進む
+  │
+  ├─ Q4: 既存のスクリプトと重複しないか？
+  │    └─ manage_asset (action: search, path: "Assets/Scripts", search_pattern: "*.cs")
+  │       重複があればユーザーに報告する
+  │
+  └─ Q5: 以下を決定できたか？
+       ├─ クラス名（PascalCase）
+       ├─ 名前空間（ToioLabs.Control / ToioLabs.UI 等）
+       ├─ フォルダパス（Assets/Scripts/Control/ 等）
+       └─ 必要な GameObject とコンポーネントの一覧
+       すべて決まった → Step 2 に進む
+       決まっていない → MCP で調べるか、ユーザーに聞く
 ```
 
-### 2-3. 構文を検証する
+---
+
+## Step 2: コード生成
+
+### 思考フロー: コードを書く前のチェック
 
 ```
-ツール: validate_script
-パラメータ:
-  uri: "Assets/Scripts/<サブフォルダ>/<クラス名>.cs"
-  level: "standard"
-  include_diagnostics: true
+コードを書こうとしている
+  │
+  ├─ unity-always-on-rules.md の最終チェックリスト（12 項目）を
+  │  頭の中に入れたか？
+  │    ├─ NO → ファイルを開いてチェックリストを確認する
+  │    └─ YES → 書き始めてよい
+  │
+  ├─ コードを書き終えた → 最終チェックリストを 1 項目ずつ通す
+  │    ├─ 1 つでも NG → 修正する
+  │    └─ すべて OK → ファイル保存に進む
+  │
+  ├─ ファイルを保存する
+  │    └─ create_script (path: "Assets/Scripts/<フォルダ>/<クラス名>.cs", contents: ...)
+  │
+  └─ 構文を検証する
+       └─ validate_script (uri: ..., level: "standard", include_diagnostics: true)
+          ├─ エラー 0 → Step 3 に進む ✅
+          └─ エラーあり → 修正して再保存 → 再検証（ループ）
 ```
-
-- エラーがある場合は修正して再保存する。エラーが解消するまで繰り返す。
 
 ---
 
 ## Step 3: シーンへの組み込み
 
-MCP ツールを使用して、必要な GameObject の作成とコンポーネントのアタッチを行う。
-
-### 3-1. 前提条件の確認と準備（UI 機能の場合）
-
-Step 1 で Canvas / EventSystem が不足していた場合、先に作成する。
+### 思考フロー: 何を作ればよいか
 
 ```
-ツール: manage_gameobject
-パラメータ:
-  action: "create"
-  name: "Canvas"
-  components_to_add: ["Canvas", "CanvasScaler", "GraphicRaycaster"]
-```
-
-```
-ツール: manage_gameobject
-パラメータ:
-  action: "create"
-  name: "EventSystem"
-  components_to_add: ["EventSystem", "StandaloneInputModule"]
-```
-
-Canvas のコンポーネント設定:
-```
-ツール: manage_components
-パラメータ:
-  action: "set_property"
-  target: "Canvas"
-  component_type: "Canvas"
-  property: "renderMode"
-  value: 0
-```
-
-```
-ツール: manage_components
-パラメータ:
-  action: "set_property"
-  target: "Canvas"
-  component_type: "CanvasScaler"
-  property: "uiScaleMode"
-  value: 1
-```
-
-### 3-2. メインの GameObject を作成する
-
-```
-ツール: manage_gameobject
-パラメータ:
-  action: "create"
-  name: "<機能名に対応する名前>"
-  parent: "<親オブジェクト名 (UI の場合は Canvas)>"
-  position: [0, 0, 0]
-```
-
-### 3-3. スクリプトをアタッチする
-
-```
-ツール: manage_components
-パラメータ:
-  action: "add"
-  target: "<作成した GameObject の名前>"
-  component_type: "<Step 2 で作成したクラス名>"
-```
-
-### 3-4. 追加コンポーネントを一括アタッチする（必要な場合）
-
-複数のコンポーネントを追加する場合は `batch_execute` を使用すること。
-
-```
-ツール: batch_execute
-パラメータ:
-  commands:
-    - tool: "manage_components"
-      params:
-        action: "add"
-        target: "<GameObject名>"
-        component_type: "TextMeshProUGUI"
-    - tool: "manage_components"
-      params:
-        action: "add"
-        target: "<GameObject名>"
-        component_type: "Image"
-```
-
-### 3-5. 子オブジェクトを作成する（UI の場合）
-
-UI パーツ（ボタン、テキスト、スライダー等）が必要な場合は子 GameObject として作成する。
-
-```
-ツール: manage_gameobject
-パラメータ:
-  action: "create"
-  name: "<パーツ名 (例: TitleText)>"
-  parent: "<親 GameObject 名>"
-  components_to_add: ["RectTransform"]
+シーンに組み込む必要がある
+  │
+  ├─ Step 1 で Canvas/EventSystem が不足していたか？
+  │    ├─ YES → まず作る
+  │    │    Canvas: manage_gameobject (create, components_to_add: ["Canvas", "CanvasScaler", "GraphicRaycaster"])
+  │    │    EventSystem: manage_gameobject (create, components_to_add: ["EventSystem", "StandaloneInputModule"])
+  │    │    Canvas の renderMode を設定: manage_components (set_property, property: "renderMode", value: 0)
+  │    └─ NO → 次に進む
+  │
+  ├─ メインの GameObject を作成する
+  │    └─ manage_gameobject (action: create, name: ..., parent: ...)
+  │       UI の場合の parent → Canvas 名
+  │       3D の場合の parent → なし、またはシーンルート
+  │
+  ├─ スクリプトをアタッチする
+  │    └─ manage_components (action: add, target: ..., component_type: <クラス名>)
+  │
+  ├─ 追加コンポーネントを一括でアタッチ（2 つ以上なら batch_execute を使う）
+  │
+  └─ 子オブジェクトを作る（UI パーツなど）
+       └─ manage_gameobject (action: create, parent: <親名>, ...)
 ```
 
 ---
 
 ## Step 4: パラメータと参照のセットアップ
 
-MCP ツールを使用して、Inspector 上の値と参照を設定する。
-**AIはピクセルパーフェクトなデザインを追求してはならない。** デザインの最終調整は人間が行うため、AIは「人間が後から微調整しやすい、プレーンで論理的なUI構造」を構築することに専念する。
-
-### 4-1. RectTransform の仮配置（UI の場合）
-複雑なAnchor設定や極端なサイズ指定は避け、後から人間が自由に動かせる標準的な状態（画面中央など）に仮配置するにとどめる。
-人間が視覚的にレイアウトを調整しやすいように、テキストUIには**必ずテスト用の文字列を挿入し、空っぽの状態にしないこと。
+### 思考フロー: 何を設定すればよいか
 
 ```
-ツール: manage_components
-パラメータ:
-  action: "set_property"
-  target: "<GameObject名>"
-  component_type: "RectTransform"
-  property: "anchorMin"
-  value: {"x": 0, "y": 0}
+コンポーネントが追加された。パラメータを設定する。
+  │
+  ├─ Q1: RectTransform の位置調整が必要か？（UI の場合）
+  │    ├─ YES → 複雑な Anchor 設定は避ける。人間が後で調整しやすい状態にする
+  │    │    ❌ ピクセルパーフェクトを追求しない
+  │    │    ✅ 画面中央など標準的な位置に仮配置する
+  │    └─ NO → 次に進む
+  │
+  ├─ Q2: テキスト UI があるか？
+  │    ├─ YES → 必ずテスト用の文字列を入れる。空のままにしない
+  │    └─ NO → 次に進む
+  │
+  ├─ Q3: [SerializeField] のオブジェクト参照を設定する必要があるか？
+  │    ├─ YES → unity-mcp-guidelines.md §6 のフローに従う
+  │    │    1. find_gameobjects で参照先の instanceID を取得
+  │    │    2. manage_components (set_property, value: {"instanceID": ...})
+  │    │    ❌ 過去の会話の instanceID を使い回さない
+  │    └─ NO → 次に進む
+  │
+  ├─ Q4: 親オブジェクトの localScale は (1,1,1) か？
+  │    ├─ NO → unity-mcp-guidelines.md §7 のフローに従い正規化する
+  │    └─ YES → OK
+  │
+  └─ Q5: 設定が正しく反映されたか確認する
+       └─ read_resource (mcpforunity://scene/gameobject/<id>/components)
+          null や None のフィールドがないか確認
 ```
-
-```
-ツール: manage_components
-パラメータ:
-  action: "set_property"
-  target: "<GameObject名>"
-  component_type: "RectTransform"
-  property: "anchorMax"
-  value: {"x": 1, "y": 1}
-```
-
-```
-ツール: manage_components
-パラメータ:
-  action: "set_property"
-  target: "<GameObject名>"
-  component_type: "RectTransform"
-  property: "sizeDelta"
-  value: {"x": 0, "y": 0}
-```
-
-### 4-2. SerializeField への参照割り当て
-
-スクリプトの `[SerializeField]` フィールドに参照を設定する。
-
-まず、設定対象のフィールド一覧をコンポーネント情報から確認する：
-
-```
-ツール: read_resource
-パラメータ:
-  ServerName: "unityMCP"
-  Uri: "mcpforunity://scene/gameobject/<instance_id>/component/<クラス名>"
-```
-
-次に、各フィールドに値を設定する：
-
-```
-ツール: manage_components
-パラメータ:
-  action: "set_property"
-  target: "<GameObject名>"
-  component_type: "<クラス名>"
-  property: "<フィールド名>"
-  value: <設定値>
-```
-
-### 4-3. 設定結果の確認
-
-設定が正しく反映されたか確認する：
-
-```
-ツール: read_resource
-パラメータ:
-  ServerName: "unityMCP"
-  Uri: "mcpforunity://scene/gameobject/<instance_id>/components"
-```
-
-- `null` や `None` のまま残っているフィールドがないか確認する。
-- 想定と異なる値が設定されていないか確認する。
 
 ---
 
-## Step 5: 動作検証と視覚的報告
+## Step 5: 検証と報告
 
-実装が完了したら、コンパイルエラーの確認とスクリーンショットによる視覚的報告を行う。
-
-### 5-1. アセットのリフレッシュとコンパイル確認
+### 思考フロー: 何を確認すればよいか
 
 ```
-ツール: refresh_unity
-パラメータ:
-  compile: "request"
-  wait_for_ready: true
-```
-
-### 5-2. コンソールエラーの確認
-
-```
-ツール: read_console
-パラメータ:
-  types: "error"
-  count: "10"
-```
-
-- コンパイルエラーがある場合 → Step 2 に戻りスクリプトを修正する。
-- ランタイムエラーがある場合 → `/debug-unity` ワークフローに切り替える。
-- エラーがない場合 → 次に進む。
-
-### 5-3. スクリーンショットを撮影する
-
-// turbo
-```
-ツール: manage_scene
-パラメータ:
-  action: "screenshot"
-  screenshot_file_name: "feature_result"
-```
-
-### 5-4. シーンを保存する
-
-```
-ツール: manage_scene
-パラメータ:
-  action: "save"
-```
-
-### 5-5. ユーザーへの報告
-
-以下を含む報告を行うこと：
-
-1. **作成したスクリプト:** ファイルパスとクラスの概要
-2. **シーンの変更:** 追加した GameObject とコンポーネントの一覧
-3. **設定した参照・値:** Inspector で設定したパラメータの一覧
-4. **スクリーンショット:** 撮影した画像を添付
-5. **動作確認手順:** ユーザーが Play モードで確認すべき操作手順
-
----
-
-## フローチャート（全体の流れ）
-
-```
-ユーザーの依頼受信
-    │
-    ▼
-Step 1: 要件定義 + 現状確認 (MCP でシーン・アセットを調査)
-    │
-    ├─ 不明点あり → ユーザーに確認
-    │
-    ▼
-Step 2: スクリプト生成 (create_script → validate_script)
-    │
-    ├─ 検証エラー → 修正して再保存
-    │
-    ▼
-Step 3: シーン組み込み (manage_gameobject → manage_components)
-    │
-    ▼
-Step 4: パラメータ設定 (manage_components set_property)
-    │
-    ├─ 参照が null → 再設定
-    │
-    ▼
-Step 5: 検証 + 報告 (refresh_unity → read_console → screenshot)
-    │
-    ├─ コンパイルエラー → Step 2 に戻る
-    ├─ ランタイムエラー → /debug-unity に切り替え
-    │
-    ▼
-完了 → ユーザーに報告
+実装が完了した。検証に入る。
+  │
+  ├─ 1. refresh_unity (compile: request, wait_for_ready: true)
+  │
+  ├─ 2. read_console (types: "error", count: "10")
+  │    ├─ エラー 0 件 → 次に進む ✅
+  │    ├─ コンパイルエラー → Step 2 に戻ってスクリプトを修正する
+  │    └─ ランタイムエラー → /debug-unity ワークフローに切り替える
+  │
+  // turbo
+  ├─ 3. manage_scene (action: screenshot, screenshot_file_name: "feature_result")
+  │
+  ├─ 4. manage_scene (action: save)
+  │
+  └─ 5. ユーザーへの報告（以下を含めること）
+       ├─ 作成したスクリプト: ファイルパスとクラスの概要
+       ├─ シーンの変更: 追加した GameObject とコンポーネントの一覧
+       ├─ 設定した参照・値: Inspector で設定したパラメータの一覧
+       ├─ スクリーンショット: 撮影した画像を添付
+       └─ 動作確認手順: ユーザーが Play モードで確認すべき操作手順
 ```
