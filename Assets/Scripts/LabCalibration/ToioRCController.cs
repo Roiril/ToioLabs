@@ -1,4 +1,5 @@
 using UnityEngine;
+using ToioLabs.Core;
 using toio;
 using System.Threading.Tasks;
 
@@ -10,32 +11,32 @@ public class ToioRCController : MonoBehaviour
 
     async void Start()
     {
-        Debug.Log("ToioRCController: Start method called.");
+        AppLogger.Log("ToioRCController: Start method called.");
         try
         {
             // Force connection to Real cubes (not Simulator)
             cubeManager = new CubeManager(ConnectType.Real);
             
-            Debug.Log("ToioRCController: Attempting to connect to a cube (Real Mode)...");
+            AppLogger.Log("ToioRCController: Attempting to connect to a cube (Real Mode)...");
             // Search for cubes
             var cubes = await cubeManager.MultiConnect(1); // Try to connect to 1 cube
             
             if (cubes != null && cubes.Length > 0)
             {
                 cube = cubes[0];
-                Debug.Log("ToioRCController: Toio Cube Connected! ID: " + cube.id);
+                AppLogger.Log("ToioRCController: Toio Cube Connected! ID: " + cube.id);
                 
                 // Turn on light to visually confirm
                 cube.TurnLedOn(255, 0, 0, 0); // Red light
             }
             else
             {
-                Debug.LogWarning("ToioRCController: No cubes found or connection timed out.");
+                AppLogger.LogWarning("ToioRCController: No cubes found or connection timed out.");
             }
         }
         catch (System.Exception e)
         {
-            Debug.LogError("ToioRCController: Error during connection: " + e.Message);
+            AppLogger.LogError("ToioRCController: Error during connection: " + e.Message);
         }
     }
 

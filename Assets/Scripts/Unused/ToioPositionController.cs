@@ -1,4 +1,5 @@
 using UnityEngine;
+using ToioLabs.Core;
 using toio;
 using Cysharp.Threading.Tasks;
 
@@ -15,17 +16,17 @@ public class ToioPositionController : MonoBehaviour
 
     async void Start()
     {
-        Debug.Log("ToioPositionController: Start method called.");
+        AppLogger.Log("ToioPositionController: Start method called.");
         // 1. Connect to multiple cubes to find the right one
         cubeManager = new CubeManager(ConnectType.Real);
-        Debug.Log("ToioPositionController: Scanning for cubes...");
+        AppLogger.Log("ToioPositionController: Scanning for cubes...");
         
         // Connect to up to 4 cubes to ensure we catch the one on the mat
         var cubes = await cubeManager.MultiConnect(4);
 
         if (cubes != null && cubes.Length > 0)
         {
-            Debug.Log($"Connected to {cubes.Length} cubes. Checking which one is on the mat...");
+            AppLogger.Log($"Connected to {cubes.Length} cubes. Checking which one is on the mat...");
             
             // 2. Configure Sensors for ALL cubes first
             foreach (var c in cubes)
@@ -40,7 +41,7 @@ public class ToioPositionController : MonoBehaviour
             // 3. Find the cube that has valid coordinates
             foreach (var c in cubes)
             {
-                Debug.Log($"Cube ID:{c.id} Pos:({c.x},{c.y})");
+                AppLogger.Log($"Cube ID:{c.id} Pos:({c.x},{c.y})");
                 if (c.x != 0 || c.y != 0)
                 {
                     cube = c;
@@ -51,12 +52,12 @@ public class ToioPositionController : MonoBehaviour
             // Fallback: If none found, warn user but pick the first one (or keep searching)
             if (cube == null)
             {
-                Debug.LogWarning("No cube detected on the mat! Picking the first one anyway, but it may not work.");
+                AppLogger.LogWarning("No cube detected on the mat! Picking the first one anyway, but it may not work.");
                 cube = cubes[0];
             }
             else
             {
-                Debug.Log($"Found valid cube! ID: {cube.id}");
+                AppLogger.Log($"Found valid cube! ID: {cube.id}");
                 // Disconnect others to save battery/bandwidth? 
                 // Optional: keep them connected or disconnect. For now, let's keep it simple and just ignore them.
                 // But to be clean, let's disconnect unused ones.
@@ -69,12 +70,12 @@ public class ToioPositionController : MonoBehaviour
             // 4. Setup Active Cube
             cube.TurnLedOn(0, 255, 0, 500); // Green flash
             cube.targetMoveCallback.AddListener("PositionController", OnTargetMoveResult);
-            cube.idCallback.AddListener("DebugLog", (c) => Debug.Log($"[Callback] ID Updated: ({c.x}, {c.y}) Angle: {c.angle}"));
-            cube.idMissedCallback.AddListener("DebugLog", (c) => Debug.LogWarning("[Callback] ID Missed!"));
+            cube.idCallback.AddListener("DebugLog", (c) => AppLogger.Log($"[Callback] ID Updated: ({c.x}, {c.y}) Angle: {c.angle}"));
+            cube.idMissedCallback.AddListener("DebugLog", (c) => AppLogger.LogWarning("[Callback] ID Missed!"));
         }
         else
         {
-            Debug.LogWarning("Connection failed. No cubes found.");
+            AppLogger.LogWarning("Connection failed. No cubes found.");
         }
     }
 
@@ -90,17 +91,17 @@ public class ToioPositionController : MonoBehaviour
         // Log status every 1 second
         if (Time.time % 2.0f < 0.05f)
         {
-             Debug.Log($"[StatusCheck] X:{cube.x} Y:{cube.y} Angle:{cube.angle} IsConnected:{cube.isConnected}");
+             AppLogger.Log($"[StatusCheck] X:{cube.x} Y:{cube.y} Angle:{cube.angle} IsConnected:{cube.isConnected}");
         }
 
         // 4. Trigger
         if (Input.GetKeyDown(KeyCode.Space))
         {
-            Debug.Log($"移動開始要求: 現在地({cube.x}, {cube.y}) 角度{cube.angle} -> 目標(250, 250)");
+            AppLogger.Log($"移動開始要求: 現在地({cube.x}, {cube.y}) 角度{cube.angle} -> 目標(250, 250)");
 
             if (cube.x == 0 && cube.y == 0)
             {
-                Debug.LogWarning("座標が(0,0)です。マット上の位置を認識できていない可能性があります。マットの上に置いてあるか、センサーが汚れていないか確認してください。");
+                AppLogger.LogWarning("座標が(0,0)です。マット上の位置を認識できていない可能性があります。マットの上に置いてあるか、センサーが汚れていないか確認してください。");
                 // Force request sensor data just in case
                 // cube.RequestSensor(); // Deprecated but might help debug? No, rely on Config.
             }
@@ -121,13 +122,13 @@ public class ToioPositionController : MonoBehaviour
         switch (response)
         {
             case Cube.TargetMoveRespondType.Normal:
-                Debug.Log("到着しました");
+                AppLogger.Log("到着しました");
                 break;
             case Cube.TargetMoveRespondType.ToioIDmissed:
-                Debug.Log("マットから外れました");
+                AppLogger.Log("マットから外れました");
                 break;
             default:
-                Debug.Log($"移動終了: {response}");
+                AppLogger.Log($"移動終了: {response}");
                 break;
         }
     }

@@ -1,4 +1,5 @@
 using UnityEngine;
+using ToioLabs.Core;
 using toio;
 using Cysharp.Threading.Tasks;
 using System.Collections.Generic;
@@ -35,7 +36,7 @@ public class ToioPatrolController : MonoBehaviour
     {
         // --- 1. Robust Connection Logic (Same as ToioPositionController) ---
         cubeManager = new CubeManager(ConnectType.Real);
-        Debug.Log("ToioPatrolController: Scanning for cubes...");
+        AppLogger.Log("ToioPatrolController: Scanning for cubes...");
         statusMessage = "Scanning...";
 
         // Connect to up to 4 cubes to ensure we catch the one on the mat
@@ -43,7 +44,7 @@ public class ToioPatrolController : MonoBehaviour
 
         if (cubes != null && cubes.Length > 0)
         {
-            Debug.Log($"Connected to {cubes.Length} cubes. Identifying target...");
+            AppLogger.Log($"Connected to {cubes.Length} cubes. Identifying target...");
             
             // Configure Sensors for ALL cubes
             foreach (var c in cubes)
@@ -68,7 +69,7 @@ public class ToioPatrolController : MonoBehaviour
             // Fallback
             if (cube == null) 
             {
-                Debug.LogWarning("No cube on mat detected. Picking first one.");
+                AppLogger.LogWarning("No cube on mat detected. Picking first one.");
                 cube = cubes[0];
             }
             else
@@ -81,18 +82,18 @@ public class ToioPatrolController : MonoBehaviour
             }
 
             isConnected = true;
-            Debug.Log($"ToioPatrolController: Ready! ID {cube.id}");
+            AppLogger.Log($"ToioPatrolController: Ready! ID {cube.id}");
             statusMessage = "Ready (Press P to Start)";
             cube.TurnLedOn(0, 255, 0, 500); // Green flash
 
             // Register Callbacks
             cube.targetMoveCallback.AddListener("PatrolController", OnTargetMoveResult);
             // Debug Log for missed
-             cube.idMissedCallback.AddListener("PatrolController", (c) => Debug.LogWarning("[Patrol] Mat Missed!"));
+             cube.idMissedCallback.AddListener("PatrolController", (c) => AppLogger.LogWarning("[Patrol] Mat Missed!"));
         }
         else
         {
-            Debug.LogWarning("ToioPatrolController: No cubes found.");
+            AppLogger.LogWarning("ToioPatrolController: No cubes found.");
             statusMessage = "Connection Failed";
         }
     }
@@ -118,13 +119,13 @@ public class ToioPatrolController : MonoBehaviour
         
         if (isPatrolling)
         {
-            Debug.Log("Patrol Started");
+            AppLogger.Log("Patrol Started");
             statusMessage = "Patrolling: Moving to WP " + currentWaypointIndex;
             MoveToNextWaypoint();
         }
         else
         {
-            Debug.Log("Patrol Paused");
+            AppLogger.Log("Patrol Paused");
             statusMessage = "Paused";
             // Stop movement immediately
             cube.Move(0, 0, 0); 
@@ -137,7 +138,7 @@ public class ToioPatrolController : MonoBehaviour
 
         Vector2 target = waypoints[currentWaypointIndex];
         
-        Debug.Log($"[Patrol] Moving to WP[{currentWaypointIndex}]: {target}");
+        AppLogger.Log($"[Patrol] Moving to WP[{currentWaypointIndex}]: {target}");
         
         cube.TargetMove(
             targetX: (int)target.x,
@@ -155,7 +156,7 @@ public class ToioPatrolController : MonoBehaviour
 
         if (response == Cube.TargetMoveRespondType.Normal)
         {
-            Debug.Log($"[Patrol] Arrived at WP[{currentWaypointIndex}]");
+            AppLogger.Log($"[Patrol] Arrived at WP[{currentWaypointIndex}]");
             
             // Start Wait
             isWaiting = true;
@@ -178,14 +179,14 @@ public class ToioPatrolController : MonoBehaviour
         }
         else if (response == Cube.TargetMoveRespondType.ToioIDmissed)
         {
-            Debug.LogWarning("[Patrol] Position Lost! Stopping Patrol.");
+            AppLogger.LogWarning("[Patrol] Position Lost! Stopping Patrol.");
             isPatrolling = false;
             statusMessage = "Error: Position Lost";
             cube.PlayPresetSound(3); // Error sound (ID 3 = Cancel/Error usually)
         }
         else
         {
-            Debug.Log($"[Patrol] Move ended with response: {response}");
+            AppLogger.Log($"[Patrol] Move ended with response: {response}");
             // Optional: Retry logic could go here
         }
     }

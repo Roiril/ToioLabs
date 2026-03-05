@@ -1,4 +1,5 @@
 using UnityEngine;
+using ToioLabs.Core;
 using UnityEngine.UI; // Slider用
 using TMPro;          // TextMeshPro用
 using toio;
@@ -64,7 +65,7 @@ public class ZoetropeController : MonoBehaviour
         if (simCube != null && simManager.handles.Count > 0)
         {
             this.simHandle = simManager.handles[0];
-            Debug.Log("【Sim】接続成功");
+            AppLogger.Log("【Sim】接続成功");
         }
 
         // (2) 実機
@@ -73,7 +74,7 @@ public class ZoetropeController : MonoBehaviour
         if (realCube != null && realManager.handles.Count > 0)
         {
             this.realHandle = realManager.handles[0];
-            Debug.Log("【Real】接続成功");
+            AppLogger.Log("【Real】接続成功");
             
             // 実機のLEDを緑にして準備完了を知らせる
             realHandle.cube.TurnLedOn(0, 255, 0, 500);
